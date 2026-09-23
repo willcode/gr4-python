@@ -213,7 +213,7 @@ configuration.
 CMakeLists.txt        find_package(gnuradio4 CONFIG), pybind11, install into the prefix's site-packages
 src/_gr4.cpp          the extension
 python/gr4/           __init__, registry, graph, scheduler, values, errors; _gr4.pyi; py.typed
-tests/                pytest, no hardware, each file in seconds
+tests/                the standard library's unittest, no hardware, each file in seconds
 examples/             tone to file, list the registry, change a setting on a running graph
 ```
 
