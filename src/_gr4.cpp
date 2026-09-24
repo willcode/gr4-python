@@ -5,6 +5,9 @@
  * registry keys, and settings travel as `pmt::Value` maps converted to and from Python objects.
  */
 
+#include <gnuradio-4.0/Message.hpp>
+#include <gnuradio-4.0/Runtime.hpp>
+#include <gnuradio-4.0/Tag.hpp>
 #include <gnuradio-4.0/Tensor.hpp>
 #include <gnuradio-4.0/Value.hpp>
 
@@ -14,16 +17,21 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <complex>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
+#include <expected>
 #include <format>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <optional>
+#include <ranges>
 #include <span>
 #include <string>
 #include <string_view>
@@ -772,6 +780,345 @@ py::object toPython(const Value& value) {
     });
 }
 
+/// Converts a settings map from Python. `parameters` is a dict with str keys, or None for an empty map; `types` maps
+/// a key to the type code its value converts to, and a key it does not name takes the type its Python value selects.
+gr::property_map propertyMapFrom(const py::object& parameters, const py::object& types) {
+    gr::property_map map;
+    if (parameters.is_none()) {
+        return map;
+    }
+    if (!PyDict_Check(parameters.ptr())) {
+        throw py::type_error(std::format("parameters need a dict, got {}", typeNameOf(parameters)));
+    }
+    if (!types.is_none() && !PyDict_Check(types.ptr())) {
+        throw py::type_error(std::format("types need a dict of type codes, got {}", typeNameOf(types)));
+    }
+    for (const auto& [key, item] : py::reinterpret_borrow<py::dict>(parameters)) {
+        if (!PyUnicode_Check(key.ptr())) {
+            throw py::type_error(std::format("parameter keys are str, got {}", typeNameOf(key)));
+        }
+        const std::string name = stringFrom(key, Subject{});
+        const Subject     subject{.key = name};
+        PyObject*         typeCode = types.is_none() ? nullptr : PyDict_GetItemWithError(types.ptr(), key.ptr());
+        throwIfPythonError();
+        Value value = typeCode == nullptr ? valueFrom(item, subject) : valueAs(item, parseTypeCode(stringFrom(typeCode, subject)), subject);
+        map.insert_or_assign(std::pmr::string(name), std::move(value));
+    }
+    return map;
+}
+
+/// The class `gr4._gr4.Error`, created when the module initializes and kept for the life of the process.
+PyObject* errorClass = nullptr;
+
+/// Sets `Error(message, where, time_ns)` as the pending Python exception.
+void setError(std::string_view message, std::string_view where, std::uint64_t timeNs) {
+    const py::object error = py::reinterpret_borrow<py::object>(errorClass)(stringToPython(message), stringToPython(where), timeNs);
+    PyErr_SetObject(errorClass, error.ptr());
+}
+
+[[noreturn]] void raiseError(std::string_view message, std::string_view where, std::uint64_t timeNs = 0U) {
+    setError(message, where, timeNs);
+    throw py::error_already_set();
+}
+
+[[noreturn]] void raiseError(const gr::RuntimeError& error) { raiseError(error.message, error.where, error.time); }
+
+template<typename T>
+T valueOrRaise(std::expected<T, gr::RuntimeError>&& result) {
+    if (!result.has_value()) {
+        raiseError(result.error());
+    }
+    return std::move(*result);
+}
+
+void raiseIfFailed(const std::expected<void, gr::RuntimeError>& result) {
+    if (!result.has_value()) {
+        raiseError(result.error());
+    }
+}
+
+std::uint64_t nanosecondsOf(std::chrono::system_clock::time_point when) { return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(when.time_since_epoch()).count()); }
+
+/// Raises a C++ exception a call lets out as `Error`. The exceptions of pybind11 itself keep their Python types.
+void translateException(std::exception_ptr exception) {
+    try {
+        std::rethrow_exception(exception);
+    } catch (const py::builtin_exception&) {
+        throw;
+    } catch (const gr::exception& error) {
+        setError(error.message, std::format("{}:{}", error.sourceLocation.file_name(), error.sourceLocation.line()), nanosecondsOf(error.errorTime));
+    } catch (const std::exception& error) {
+        setError(error.what(), "", 0U);
+    } catch (...) {
+        setError("a C++ exception of unknown type", "", 0U);
+    }
+}
+
+void defineErrorClass(py::module_& module) {
+    auto error = py::reinterpret_steal<py::object>(PyErr_NewExceptionWithDoc("gr4._gr4.Error",
+        "A failure the runtime reported.\n\n"
+        "message is the reason, where the framework's source location or the failing method, and time_ns the time the "
+        "framework reported the error, in nanoseconds since the epoch, or 0.",
+        PyExc_Exception, nullptr));
+    if (!error) {
+        throw py::error_already_set();
+    }
+    error.attr("__init__") = py::cpp_function(
+        [](const py::object& self, const py::object& message, const py::object& where, const py::object& timeNs) {
+            self.attr("args")    = py::make_tuple(message);
+            self.attr("message") = message;
+            self.attr("where")   = where;
+            self.attr("time_ns") = timeNs;
+        },
+        py::is_method(error), py::arg("message") = "", py::arg("where") = "", py::arg("time_ns") = 0);
+    module.attr("Error") = error;
+    errorClass           = error.release().ptr();
+}
+
+/// The value of GNURADIO4_PLUGIN_DIRECTORIES when a call first reached the plugin loader, which reads it then.
+std::optional<std::string> loaderDirectories;
+
+void noteLoaderUse() {
+    if (!loaderDirectories.has_value()) {
+        const char* value = std::getenv(kPluginDirectoriesVariable);
+        loaderDirectories = value != nullptr ? value : "";
+    }
+}
+
+/// The directories the loader reads, split as the loader splits the variable: at each colon, empty entries dropped.
+std::vector<std::string> pluginDirectories() {
+    const char*              current = std::getenv(kPluginDirectoriesVariable);
+    const std::string_view   value   = loaderDirectories.has_value() ? std::string_view(*loaderDirectories) : std::string_view(current != nullptr ? current : "");
+    std::vector<std::string> directories;
+    for (const auto part : std::views::split(value, ':')) {
+        if (!std::ranges::empty(part)) {
+            directories.emplace_back(std::ranges::begin(part), std::ranges::end(part));
+        }
+    }
+    return directories;
+}
+
+/// Runs `call` with the GIL released. Python objects are converted before and after, never inside.
+template<typename Call>
+std::invoke_result_t<Call> withoutGil(Call&& call) {
+    py::gil_scoped_release release;
+    return std::forward<Call>(call)();
+}
+
+bool interpreterIsFinalizing() {
+#if PY_VERSION_HEX >= 0x030D0000
+    return Py_IsFinalizing() != 0;
+#else
+    return _Py_IsFinalizing() != 0;
+#endif
+}
+
+/// Runs `call` without the GIL when this thread holds it, for a destructor, which may run with or without it. While
+/// the interpreter finalizes the GIL stays held; the calls made here take no Python object.
+template<typename Call>
+void withoutGilWhenHeld(Call&& call) {
+    if (PyGILState_Check() != 0 && !interpreterIsFinalizing()) {
+        py::gil_scoped_release release;
+        std::forward<Call>(call)();
+    } else {
+        std::forward<Call>(call)();
+    }
+}
+
+/// Deletes an object without the GIL. Destroying a block can block, and destroying a scheduler waits for its
+/// watchdog.
+template<typename T>
+struct DeleteWithoutGil {
+    void operator()(T* object) const noexcept {
+        withoutGilWhenHeld([object] { delete object; });
+    }
+};
+
+/// The holder of a bound object whose destruction can destroy blocks or a scheduler.
+template<typename T>
+using GilFreeHolder = std::unique_ptr<T, DeleteWithoutGil<T>>;
+
+template<typename T>
+GilFreeHolder<T> holdWithoutGil(T object) {
+    return GilFreeHolder<T>(new T(std::move(object)));
+}
+
+std::string blockRepr(const gr::BlockHandle& block) {
+    if (!block.valid()) {
+        return "<BlockHandle invalid>";
+    }
+    return std::format("<BlockHandle name='{}' unique_name='{}' type='{}'>", block.name(), block.uniqueName(), block.typeName());
+}
+
+/// A Python `RuntimeGraph`: an owning graph or a view of one, and empty once `Runtime.create` consumed it.
+struct GraphObject {
+    std::optional<gr::RuntimeGraph> graph;
+    bool                            isView = false;
+
+    [[nodiscard]] gr::RuntimeGraph& get() {
+        if (!graph.has_value()) {
+            raiseError("the graph moved into a scheduler; Runtime.graph() views it there", "RuntimeGraph");
+        }
+        return *graph;
+    }
+};
+
+gr::RuntimeGraph::Recursive recursion(bool recursive) { return recursive ? gr::RuntimeGraph::Recursive::Yes : gr::RuntimeGraph::Recursive::No; }
+
+void defineBlockHandle(py::module_& module) {
+    py::class_<gr::BlockHandle, GilFreeHolder<gr::BlockHandle>>(module, "BlockHandle", "One block of a graph: its names, its settings and its meta-information. Two handles are equal when they name the same block.")
+        .def_property_readonly("valid", &gr::BlockHandle::valid, "True when the handle names a block.")
+        .def_property_readonly(
+            "name", [](const gr::BlockHandle& block) { return std::string(block.name()); }, "The name the block was given.")
+        .def_property_readonly(
+            "unique_name", [](const gr::BlockHandle& block) { return std::string(block.uniqueName()); }, "The name that identifies the block in its process.")
+        .def_property_readonly(
+            "type_name", [](const gr::BlockHandle& block) { return std::string(block.typeName()); }, "The registry key of the block's type.")
+        .def(
+            "get", [](const gr::BlockHandle& block, const std::optional<std::vector<std::string>>& keys) { return mapToPython(keys.has_value() ? block.get(std::span<const std::string>(*keys)) : block.get()); }, py::arg("keys") = py::none(), "Returns the active settings, all of them or those keys names.")
+        .def(
+            "get_value",
+            [](const gr::BlockHandle& block, const std::string& key) {
+                const std::optional<Value> value = block.get(key);
+                if (!value.has_value()) {
+                    throw py::key_error(key);
+                }
+                return toPython(*value);
+            },
+            py::arg("key"), "Returns the active value of one setting. KeyError when the block has no setting of that name.")
+        .def(
+            "active_parameters", [](const gr::BlockHandle& block) { return mapToPython(block.activeParameters()); }, "Returns the settings in force.")
+        .def(
+            "staged_parameters", [](const gr::BlockHandle& block) { return mapToPython(block.stagedParameters()); }, "Returns the settings staged for the block's next work call.")
+        .def(
+            "default_parameters", [](const gr::BlockHandle& block) { return mapToPython(block.defaultParameters()); }, "Returns the settings reset_defaults() restores.")
+        .def(
+            "setting_types",
+            [](const gr::BlockHandle& block) {
+                py::dict types;
+                for (const auto& [key, value] : block.activeParameters()) {
+                    types[stringToPython(key)] = typeCodeOf(value);
+                }
+                return types;
+            },
+            "Returns the type code of every active setting, by key.")
+        .def(
+            "set_staged", [](gr::BlockHandle& block, const py::object& parameters, const py::object& types) { return mapToPython(block.setStaged(propertyMapFrom(parameters, types))); }, py::arg("parameters"), py::arg("types") = py::none(), "Stages settings for the block's next work call; types maps a key to its type code. Returns the settings that could not be staged.")
+        .def(
+            "set", [](gr::BlockHandle& block, const py::object& parameters, const py::object& types) { return mapToPython(block.set(propertyMapFrom(parameters, types))); }, py::arg("parameters"), py::arg("types") = py::none(), "Stores settings without staging them; types maps a key to its type code. Returns the settings that could not be stored.")
+        .def(
+            "meta_information", [](const gr::BlockHandle& block) { return mapToPython(block.metaInformation()); }, "Returns the block's meta-information.")
+        .def(
+            "set_meta_information", [](gr::BlockHandle& block, const py::object& information) { block.setMetaInformation(propertyMapFrom(information, py::none())); }, py::arg("information"), "Replaces the block's meta-information.")
+        .def("store_defaults", &gr::BlockHandle::storeDefaults, "Makes the active settings the defaults.")
+        .def("reset_defaults", &gr::BlockHandle::resetDefaults, "Restores the default settings.")
+        .def(
+            "__eq__", [](const gr::BlockHandle& self, const gr::BlockHandle& other) { return self.uniqueName() == other.uniqueName(); }, py::is_operator())
+        .def("__hash__", [](const gr::BlockHandle& block) { return py::hash(py::str(std::string(block.uniqueName()))); })
+        .def("__repr__", &blockRepr);
+}
+
+void definePortAndEdge(py::module_& module) {
+    py::class_<gr::RuntimePort>(module, "RuntimePort", "One port of a block, as RuntimeGraph.input_ports() and output_ports() describe it.").def_readonly("name", &gr::RuntimePort::name, "The name connect() accepts: 'out', or 'in#1' for element 1 of a collection.").def_readonly("type_name", &gr::RuntimePort::typeName, "The value type, as port_type_name() spells it.").def_readonly("is_input", &gr::RuntimePort::isInput, "True for an input port.").def_readonly("is_message", &gr::RuntimePort::isMessage, "True for a message port, False for a stream port.").def_readonly("is_optional", &gr::RuntimePort::isOptional, "True when the port may stay unconnected.").def_readonly("is_synchronous", &gr::RuntimePort::isSynchronous, "True when the port moves samples in step with the block's other synchronous ports.").def_readonly("is_connected", &gr::RuntimePort::isConnected, "True while a running scheduler holds the port's edge connected.").def_readonly("domain", &gr::RuntimePort::domain, "The compute domain of the port.").def_readonly("collection", &gr::RuntimePort::collection, "The name of the collection the port belongs to, or ''.").def_readonly("index", &gr::RuntimePort::index, "The port's position in its collection, or 0.").def_readonly("min_samples", &gr::RuntimePort::minSamples, "The fewest samples the port takes per work call.").def_readonly("max_samples", &gr::RuntimePort::maxSamples, "The most samples the port takes per work call.").def("__repr__", [](const gr::RuntimePort& port) { return std::format("<RuntimePort {} {} {}>", port.name, port.isInput ? "input" : "output", port.typeName); });
+
+    py::class_<gr::RuntimeEdge, GilFreeHolder<gr::RuntimeEdge>>(module, "RuntimeEdge", "One edge of a graph, as RuntimeGraph.edges() lists it.").def_property_readonly("source_block", [](const gr::RuntimeEdge& edge) { return edge.sourceBlock; }, "The block the edge leaves.").def_readonly("source_port", &gr::RuntimeEdge::sourcePort, "The output port the edge leaves.").def_property_readonly("destination_block", [](const gr::RuntimeEdge& edge) { return edge.destinationBlock; }, "The block the edge enters.").def_readonly("destination_port", &gr::RuntimeEdge::destinationPort, "The input port the edge enters.").def_property_readonly("min_buffer_size", [](const gr::RuntimeEdge& edge) { return edge.edge.minBufferSize; }, "The smallest buffer the edge asks for, the framework's default when none was given.").def_property_readonly("weight", [](const gr::RuntimeEdge& edge) { return edge.edge.weight; }, "The edge's weight.").def_property_readonly("name", [](const gr::RuntimeEdge& edge) { return edge.edge.name; }, "The edge's name.").def("__repr__", [](const gr::RuntimeEdge& edge) { return std::format("<RuntimeEdge {}.{} -> {}.{}>", edge.sourceBlock.uniqueName(), edge.sourcePort, edge.destinationBlock.uniqueName(), edge.destinationPort); });
+}
+
+void defineRuntimeGraph(py::module_& module) {
+    py::class_<GraphObject, GilFreeHolder<GraphObject>>(module, "RuntimeGraph",
+        "A flow graph built by registry name.\n\n"
+        "A RuntimeGraph owns its graph, or views one a subgraph block or a scheduler owns. A graph handed to "
+        "Runtime.create moves into the scheduler, and every later call on this object raises Error.\n\n"
+        "The constructor, emplace(), emplace_subgraph(), remove(), clear() and from_yaml() release the GIL, and so "
+        "does the deallocation of a graph, a block handle or an edge.")
+        .def(py::init([](const py::object& settings, const py::object& types) {
+            gr::property_map initialSettings = propertyMapFrom(settings, types);
+            noteLoaderUse();
+            return holdWithoutGil(GraphObject{.graph = withoutGil([&initialSettings] { return gr::RuntimeGraph(std::move(initialSettings)); })});
+        }),
+            py::arg("settings") = py::none(), py::arg("types") = py::none(), "Creates an empty graph with the given graph settings.")
+        .def(
+            "emplace",
+            [](GraphObject& self, const std::string& type, const std::string& name, const py::object& parameters, const py::object& types) {
+                gr::property_map  initialParameters = propertyMapFrom(parameters, types);
+                gr::RuntimeGraph& graph             = self.get();
+                return valueOrRaise(withoutGil([&] { return graph.emplace(type, name, std::move(initialParameters)); }));
+            },
+            py::arg("type"), py::arg("name"), py::arg("parameters") = py::none(), py::arg("types") = py::none(), "Instantiates the block type registered as type, names it and adds it. The parameters are in force when the block starts; types maps a key to its type code.")
+        .def(
+            "emplace_subgraph",
+            [](GraphObject& self, const std::string& name, const py::object& parameters) {
+                gr::property_map  initialParameters = propertyMapFrom(parameters, py::none());
+                gr::RuntimeGraph& graph             = self.get();
+                return valueOrRaise(withoutGil([&] { return graph.emplaceSubgraph(name, std::move(initialParameters)); }));
+            },
+            py::arg("name"), py::arg("parameters") = py::none(), "Adds a nested graph; interior() opens it for wiring.")
+        .def(
+            "interior", [](GraphObject& self, const gr::BlockHandle& block) { return holdWithoutGil(GraphObject{.graph = valueOrRaise(self.get().interior(block)), .isView = true}); }, py::arg("block"), "Returns a view of a subgraph's interior, or of a nested scheduler's graph.")
+        .def(
+            "blocks", [](GraphObject& self, bool recursive) { return self.get().blocks(recursion(recursive)); }, py::arg("recursive") = false, "Returns the blocks of this level of the graph, or of every level.")
+        .def(
+            "find", [](GraphObject& self, const std::string& uniqueName, bool recursive) { return valueOrRaise(self.get().find(uniqueName, recursion(recursive))); }, py::arg("unique_name"), py::arg("recursive") = true, "Returns the block with that unique name.")
+        .def(
+            "remove",
+            [](GraphObject& self, const gr::BlockHandle& block) {
+                gr::RuntimeGraph& graph = self.get();
+                raiseIfFailed(withoutGil([&graph, &block] { return graph.remove(block); }));
+            },
+            py::arg("block"), "Removes a block and its edges.")
+        .def(
+            "clear",
+            [](GraphObject& self) {
+                gr::RuntimeGraph& graph = self.get();
+                withoutGil([&graph] { graph.clear(); });
+            },
+            "Removes every block and edge.")
+        .def(
+            "connect",
+            [](GraphObject& self, const gr::BlockHandle& source, const std::string& sourcePort, const gr::BlockHandle& destination, const std::string& destinationPort, std::size_t minBufferSize, std::int32_t weight, std::string name) { //
+                raiseIfFailed(self.get().connect(source, sourcePort, destination, destinationPort, gr::EdgeSpec{.minBufferSize = minBufferSize, .weight = weight, .name = std::move(name)}));
+            },
+            py::arg("source"), py::arg("source_port"), py::arg("destination"), py::arg("destination_port"), py::arg("min_buffer_size") = 0U, py::arg("weight") = 0, py::arg("name") = "", "Connects an output port to an input port. A min_buffer_size of 0 selects the framework's default.")
+        .def(
+            "disconnect", [](GraphObject& self, const gr::BlockHandle& source, const std::string& sourcePort, const gr::BlockHandle& destination, const std::string& destinationPort) { raiseIfFailed(self.get().disconnect(source, sourcePort, destination, destinationPort)); }, py::arg("source"), py::arg("source_port"), py::arg("destination"), py::arg("destination_port"), "Removes the edge between two ports.")
+        .def(
+            "input_port_names", [](GraphObject& self, const gr::BlockHandle& block) { return self.get().inputPortNames(block); }, py::arg("block"), "Returns the names of a block's input ports.")
+        .def(
+            "output_port_names", [](GraphObject& self, const gr::BlockHandle& block) { return self.get().outputPortNames(block); }, py::arg("block"), "Returns the names of a block's output ports.")
+        .def(
+            "port_type_name", [](GraphObject& self, const gr::BlockHandle& block, bool isInput, const std::string& port) { return self.get().portTypeName(block, isInput, port); }, py::arg("block"), py::arg("is_input"), py::arg("port"), "Returns the value type of one port, or '' when the block has no such port.")
+        .def(
+            "input_ports", [](GraphObject& self, const gr::BlockHandle& block) { return self.get().inputPorts(block); }, py::arg("block"), "Describes the ports input_port_names() lists, in the same order.")
+        .def(
+            "output_ports", [](GraphObject& self, const gr::BlockHandle& block) { return self.get().outputPorts(block); }, py::arg("block"), "Describes the ports output_port_names() lists, in the same order.")
+        .def(
+            "edges", [](GraphObject& self) { return self.get().edges(); }, "Returns the edges of this level of the graph.")
+        .def(
+            "export_port", [](GraphObject& self, const gr::BlockHandle& innerBlock, bool isInput, const std::string& port, const std::string& exportedName) { raiseIfFailed(self.get().exportPort(innerBlock, isInput, port, exportedName)); }, py::arg("inner_block"), py::arg("is_input"), py::arg("port"), py::arg("exported_name"), "Publishes a port of an interior block on the subgraph, under exported_name. Call on the view interior() returns.")
+        .def(
+            "unexport_port", [](GraphObject& self, const gr::BlockHandle& innerBlock, bool isInput, const std::string& port) { raiseIfFailed(self.get().unexportPort(innerBlock, isInput, port)); }, py::arg("inner_block"), py::arg("is_input"), py::arg("port"), "Withdraws a port export_port() published.")
+        .def(
+            "exported_input_ports", [](GraphObject& self) { return mapToPython(self.get().exportedInputPorts()); }, "Returns the exported input ports: block unique name to port name to {'exportedName': name}.")
+        .def(
+            "exported_output_ports", [](GraphObject& self) { return mapToPython(self.get().exportedOutputPorts()); }, "Returns the exported output ports: block unique name to port name to {'exportedName': name}.")
+        .def_static(
+            "from_yaml",
+            [](const std::string& document) {
+                noteLoaderUse();
+                auto loaded = withoutGil([&document] { return gr::RuntimeGraph::fromYaml(document); });
+                return holdWithoutGil(GraphObject{.graph = valueOrRaise(std::move(loaded))});
+            },
+            py::arg("document"), "Loads a graph document into a new graph. A document that does not parse raises Error naming the line and column.")
+        .def(
+            "to_yaml", [](GraphObject& self) { return valueOrRaise(self.get().toYaml()); }, "Writes the graph as a graph document.")
+        .def("__repr__", [](const GraphObject& self) {
+            if (!self.graph.has_value()) {
+                return std::string("<RuntimeGraph moved into a scheduler>");
+            }
+            return std::format("<RuntimeGraph {} with {} blocks>", self.isView ? "view" : "owner", self.graph->blocks().size());
+        });
+}
+
 } // namespace
 
 PYBIND11_MODULE(_gr4, module) {
@@ -787,4 +1134,27 @@ PYBIND11_MODULE(_gr4, module) {
         "value out of range, or a fraction for an integer type, raises OverflowError, and one of the wrong kind "
         "TypeError.");
     module.def("type_code", [](const py::object& object, const std::optional<std::string>& typeCode) { return typeCodeOf(convertFrom(object, typeCode)); }, py::arg("obj"), py::arg("type_code") = py::none(), "Returns the type code of the pmt value obj converts to, by the rule convert() applies.");
+
+    defineErrorClass(module);
+    py::register_local_exception_translator(&translateException);
+    defineBlockHandle(module);
+    definePortAndEdge(module);
+    defineRuntimeGraph(module);
+
+    module.attr("DEFAULT_SCHEDULER") = std::string(gr::Runtime::kDefaultScheduler);
+    module.def(
+        "available_block_types",
+        [] {
+            noteLoaderUse();
+            return withoutGil([] { return gr::RuntimeGraph::availableBlockTypes(); });
+        },
+        "Returns the registry key of every block type this process can build.");
+    module.def(
+        "available_scheduler_types",
+        [] {
+            noteLoaderUse();
+            return withoutGil([] { return gr::RuntimeGraph::availableSchedulerTypes(); });
+        },
+        "Returns the registry key of every scheduler type this process can build.");
+    module.def("plugin_directories", &pluginDirectories, "Returns the directories the plugin loader reads, from GNURADIO4_PLUGIN_DIRECTORIES as it was at the loader's first use.");
 }
