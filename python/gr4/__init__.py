@@ -16,6 +16,7 @@ from .errors import (
     Timeout,
     UnknownBlockType,
 )
+from .values import Settings
 
 __all__ = [
     "Error",
@@ -25,6 +26,7 @@ __all__ = [
     "RunError",
     "SchedulerError",
     "SettingError",
+    "Settings",
     "Timeout",
     "UnknownBlockType",
 ]
