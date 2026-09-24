@@ -64,7 +64,7 @@ class Chain(unittest.TestCase):
         self.assertGreater(unnamed.min_buffer_size, 0)
         self.assertFalse(any(port.is_connected for port in self.graph.input_ports(self.head)))
 
-    def test_disconnect_removes_a_recorded_edge_and_names_ports_without_one(self):
+    def test_disconnect_removes_a_recorded_edge_before_a_run_and_after_one(self):
         self.graph.connect(self.source, "out", self.head, "in")
         self.graph.connect(self.head, "out", self.sink, "in")
         self.graph.disconnect(self.head, "out", self.sink, "in")
@@ -72,6 +72,14 @@ class Chain(unittest.TestCase):
         with self.assertRaises(_gr4.Error) as caught:
             self.graph.disconnect(self.head, "out", self.sink, "in")
         self.assertIn(self.head.unique_name, caught.exception.message)
+
+        self.graph.connect(self.head, "out", self.sink, "in")
+        runtime = _gr4.Runtime.create(self.graph)
+        self.addCleanup(runtime.close)
+        runtime.run_and_wait()
+        view = runtime.graph()
+        view.disconnect(self.head, "out", self.sink, "in")
+        self.assertEqual(edge_ends(view), [(self.source, self.head)])
 
     def test_a_handle_equals_the_block_found_by_its_unique_name(self):
         found = self.graph.find(self.head.unique_name)

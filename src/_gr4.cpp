@@ -11,6 +11,7 @@
 #include <gnuradio-4.0/Tensor.hpp>
 #include <gnuradio-4.0/Value.hpp>
 
+#include <pybind11/native_enum.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
@@ -20,6 +21,7 @@
 #include <chrono>
 #include <cmath>
 #include <complex>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -30,11 +32,14 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <ranges>
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -1119,6 +1124,453 @@ void defineRuntimeGraph(py::module_& module) {
         });
 }
 
+/// The longest timeout `Runtime.wait()` sets a deadline for, in seconds; a longer one waits without a deadline. A
+/// deadline further ahead overflows the clock.
+constexpr double kLongestTimedWait = 1e9;
+
+/// How long a blocking call waits without the GIL before it takes the GIL to run the signal handlers.
+constexpr std::chrono::milliseconds kSignalCheckInterval{100};
+
+using Clock = std::chrono::steady_clock;
+
+/// One run on the extension's thread: the method that started it, whether its stop was requested, whether it has
+/// ended, and its error.
+struct Run {
+    const char*                     where         = "";
+    bool                            stopRequested = false;
+    bool                            ended         = false;
+    std::optional<gr::RuntimeError> failure;
+};
+
+/// A Python `Runtime`: a scheduler holding a graph, the extension's thread that runs it, and the last run.
+///
+/// `mutex` guards every member. A call that uses the runtime holds its own reference to it, so `close()` on another
+/// thread destroys the runtime only after that call returns. One run at a time uses the thread. The first caller to
+/// find a run ended joins the thread, and the others wait on `changed` until it is joined. No thread takes the GIL
+/// while it holds `mutex`.
+struct RuntimeObject {
+    std::mutex                   mutex;
+    std::condition_variable      changed; // notified when a run ends and when the thread is joined
+    std::shared_ptr<gr::Runtime> runtime; // empty once closed
+    std::thread                  worker;
+    std::shared_ptr<Run>         current;           // the last run started, empty before the first
+    bool                         closing   = false; // close() began, and no run starts
+    bool                         joining   = false; // a caller is joining `worker`
+    std::size_t                  quiescing = 0UZ;   // the quiesce() guards held
+
+    RuntimeObject()                                = default;
+    RuntimeObject(const RuntimeObject&)            = delete;
+    RuntimeObject& operator=(const RuntimeObject&) = delete;
+
+    ~RuntimeObject() {
+        withoutGilWhenHeld([this] {
+            std::shared_ptr<Run> run;
+            {
+                std::lock_guard lock(mutex);
+                closing = true;
+                run     = busy() ? current : nullptr;
+            }
+            if (run != nullptr) {
+                if (const std::shared_ptr<gr::Runtime> held = claimStop(*run); held != nullptr) {
+                    held->stop();
+                }
+            }
+            release();
+        });
+    }
+
+    /// True while the last run started has not ended. Called with `mutex` held.
+    [[nodiscard]] bool busy() const { return current != nullptr && !current->ended; }
+
+    /// The runtime, held for one call. Raises Error once the runtime is closed.
+    [[nodiscard]] std::shared_ptr<gr::Runtime> acquire() {
+        std::shared_ptr<gr::Runtime> held;
+        {
+            std::lock_guard lock(mutex);
+            held = runtime;
+        }
+        if (held == nullptr) {
+            raiseError("the runtime is closed", "Runtime");
+        }
+        return held;
+    }
+
+    /// Returns the runtime to stop `run` with to the first caller that asks before the run ends, and nothing to every
+    /// other caller: a stop of a stopped scheduler moves it to the ERROR state.
+    [[nodiscard]] std::shared_ptr<gr::Runtime> claimStop(Run& run) {
+        std::lock_guard lock(mutex);
+        if (run.ended || run.stopRequested) {
+            return nullptr;
+        }
+        run.stopRequested = true;
+        return runtime;
+    }
+
+    /// Requests the stop of `run` once. Called with the GIL held.
+    void requestStop(Run& run) {
+        if (const std::shared_ptr<gr::Runtime> held = claimStop(run); held != nullptr) {
+            withoutGil([&held] { held->stop(); });
+        }
+    }
+
+    /// Joins the thread of an ended run. The first caller joins it, and a caller arriving meanwhile waits until the
+    /// thread is joined. Takes no Python object; called with `mutex` held through `lock`.
+    void joinEnded(std::unique_lock<std::mutex>& lock) {
+        if (joining) {
+            changed.wait(lock, [this] { return !joining; });
+            return;
+        }
+        if (busy() || !worker.joinable()) {
+            return;
+        }
+        std::thread ended = std::move(worker);
+        joining           = true;
+        lock.unlock();
+        ended.join();
+        lock.lock();
+        joining = false;
+        changed.notify_all();
+    }
+
+    void joinEnded() {
+        std::unique_lock lock(mutex);
+        joinEnded(lock);
+    }
+
+    /// Starts a run on the extension's thread, or returns why none started. The thread of an ended run is joined
+    /// first. Takes no Python object.
+    std::expected<std::shared_ptr<Run>, std::string> startRun(const char* where) {
+        std::unique_lock lock(mutex);
+        for (;;) {
+            if (runtime == nullptr || closing) {
+                return std::unexpected(std::string("the runtime is closed"));
+            }
+            if (busy()) {
+                return std::unexpected(std::string("a run is in progress"));
+            }
+            if (!joining && !worker.joinable()) {
+                break;
+            }
+            joinEnded(lock);
+        }
+        auto run   = std::make_shared<Run>();
+        run->where = where;
+        try {
+            worker = std::thread([this, held = runtime, run] { runOnWorker(*held, *run); });
+        } catch (const std::system_error& error) {
+            return std::unexpected(std::format("the extension's thread did not start: {}", error.what()));
+        }
+        current = std::move(run);
+        return current;
+    }
+
+    /// Starts a run on the extension's thread. Raises Error while a run is in progress and once the runtime is closed.
+    std::shared_ptr<Run> start(const char* where) {
+        auto started = withoutGil([this, where] { return startRun(where); });
+        if (!started.has_value()) {
+            raiseError(started.error(), where);
+        }
+        return std::move(*started);
+    }
+
+    /// The body of the extension's thread: it runs the graph to its end and keeps the result in `run`.
+    void runOnWorker(gr::Runtime& held, Run& run) noexcept {
+        std::optional<gr::RuntimeError> error;
+        try {
+            if (std::expected<void, gr::RuntimeError> result = held.runAndWait(); !result.has_value()) {
+                error = std::move(result.error());
+            }
+        } catch (const std::exception& exception) {
+            error = gr::RuntimeError{.message = exception.what(), .where = run.where, .time = 0U};
+        } catch (...) {
+            error = gr::RuntimeError{.message = "the run threw an exception of unknown type", .where = run.where, .time = 0U};
+        }
+        std::lock_guard lock(mutex);
+        run.failure = std::move(error);
+        run.ended   = true;
+        changed.notify_all();
+    }
+
+    /// Waits until `ended` holds or the deadline passes, and returns whether `ended` holds; `ended` is evaluated with
+    /// `mutex` held. The GIL is released while the call waits and taken every kSignalCheckInterval to run the signal
+    /// handlers. An exception a handler raises, the KeyboardInterrupt of Ctrl-C among them, ends the wait. Called with
+    /// the GIL held.
+    template<typename Predicate>
+    bool waitFor(Predicate ended, std::optional<Clock::time_point> deadline) {
+        for (;;) {
+            const bool done = withoutGil([&] {
+                std::unique_lock        lock(mutex);
+                const Clock::time_point slice = Clock::now() + kSignalCheckInterval;
+                return changed.wait_until(lock, deadline.has_value() ? std::min(*deadline, slice) : slice, ended);
+            });
+            if (done) {
+                return true;
+            }
+            if (deadline.has_value() && Clock::now() >= *deadline) {
+                return false;
+            }
+            if (PyErr_CheckSignals() != 0) {
+                throw py::error_already_set();
+            }
+        }
+    }
+
+    /// Waits for `run` to end, as `waitFor` does, and joins the thread.
+    void waitForEnd(const std::shared_ptr<Run>& run) {
+        waitFor([&run] { return run->ended; }, std::nullopt);
+        withoutGil([this] { joinEnded(); });
+    }
+
+    /// Waits for the last run to end, joins the thread and releases the runtime. Takes no Python object; callers
+    /// release the GIL except during finalization.
+    void release() noexcept {
+        std::shared_ptr<gr::Runtime> released;
+        {
+            std::unique_lock lock(mutex);
+            changed.wait(lock, [this] { return !busy(); });
+            joinEnded(lock);
+            released = std::move(runtime);
+        }
+    }
+};
+
+/// The context manager `Runtime.quiesce()` returns: it holds the runtime's quiescence guard between enter and exit.
+struct QuiescenceObject {
+    py::object                                  owner; // the Python Runtime, alive while the guard is held
+    RuntimeObject*                              runtime = nullptr;
+    std::shared_ptr<gr::Runtime>                held; // the runtime the guard quiesces
+    std::optional<gr::Runtime::QuiescenceGuard> guard;
+
+    QuiescenceObject(py::object ownerObject, RuntimeObject* runtimeObject) : owner(std::move(ownerObject)), runtime(runtimeObject) {}
+    QuiescenceObject(const QuiescenceObject&)            = delete;
+    QuiescenceObject& operator=(const QuiescenceObject&) = delete;
+
+    ~QuiescenceObject() { release(); }
+
+    void release() {
+        if (guard.has_value()) {
+            withoutGilWhenHeld([this] {
+                guard.reset();
+                held.reset();
+            });
+            std::lock_guard lock(runtime->mutex);
+            --runtime->quiescing;
+        }
+    }
+};
+
+void defineEnumerations(py::module_& module) {
+    py::native_enum<gr::Runtime::State>(module, "State", "enum.IntEnum", "The lifecycle state of a scheduler.").value("IDLE", gr::Runtime::State::Idle).value("INITIALIZED", gr::Runtime::State::Initialized).value("RUNNING", gr::Runtime::State::Running).value("REQUESTED_PAUSE", gr::Runtime::State::RequestedPause).value("PAUSED", gr::Runtime::State::Paused).value("REQUESTED_STOP", gr::Runtime::State::RequestedStop).value("STOPPED", gr::Runtime::State::Stopped).value("ERROR", gr::Runtime::State::Error).finalize();
+    py::native_enum<gr::RuntimeCommand>(module, "Command", "enum.IntEnum", "A command of the message plane.").value("INVALID", gr::RuntimeCommand::Invalid).value("GET", gr::RuntimeCommand::Get).value("SET", gr::RuntimeCommand::Set).value("PARTIAL", gr::RuntimeCommand::Partial).value("FINAL", gr::RuntimeCommand::Final).value("READY", gr::RuntimeCommand::Ready).value("DISCONNECT", gr::RuntimeCommand::Disconnect).value("SUBSCRIBE", gr::RuntimeCommand::Subscribe).value("UNSUBSCRIBE", gr::RuntimeCommand::Unsubscribe).value("NOTIFY", gr::RuntimeCommand::Notify).value("HEARTBEAT", gr::RuntimeCommand::Heartbeat).finalize();
+}
+
+void defineRuntimeEvent(py::module_& module) {
+    py::class_<gr::RuntimeEvent>(module, "RuntimeEvent", "One report the running graph made on the message plane.").def_readonly("source", &gr::RuntimeEvent::source, "The unique name of the reporting block.").def_readonly("endpoint", &gr::RuntimeEvent::endpoint, "The property endpoint it reported on.").def_readonly("command", &gr::RuntimeEvent::command, "FINAL for the reply to a request, NOTIFY for a notification.").def_readonly("client_request_id", &gr::RuntimeEvent::clientRequestID, "The id of the request or subscription the event answers, or ''.").def_readonly("is_error", &gr::RuntimeEvent::isError, "True when the event reports an error.").def_readonly("text", &gr::RuntimeEvent::text, "The rendered error text of an error event.").def_property_readonly("data", [](const gr::RuntimeEvent& event) { return mapToPython(event.data); }, "The message payload of an event that is not an error.").def_readonly("time_ns", &gr::RuntimeEvent::time, "The time the error was raised, in nanoseconds since the epoch, or 0.").def("__repr__", [](const gr::RuntimeEvent& event) { return std::format("<RuntimeEvent {} {} command={} id='{}'{}>", event.source, event.endpoint, static_cast<int>(event.command), event.clientRequestID, event.isError ? " error" : ""); });
+}
+
+void defineRuntime(py::module_& module) {
+    py::class_<QuiescenceObject>(module, "Quiescence", "The context manager Runtime.quiesce() returns. The work loop stays quiesced from entry to exit.")
+        .def(
+            "__enter__",
+            [](QuiescenceObject& self) -> QuiescenceObject& {
+                if (self.guard.has_value()) {
+                    raiseError("the quiesce() block is entered already", "Runtime.quiesce");
+                }
+                std::shared_ptr<gr::Runtime> held = self.runtime->acquire();
+                {
+                    std::lock_guard lock(self.runtime->mutex);
+                    ++self.runtime->quiescing;
+                }
+                try {
+                    self.guard.emplace(withoutGil([&held] { return held->quiesce(); }));
+                } catch (...) {
+                    std::lock_guard lock(self.runtime->mutex);
+                    --self.runtime->quiescing;
+                    throw;
+                }
+                self.held = std::move(held);
+                return self;
+            },
+            py::return_value_policy::reference)
+        .def("__exit__", [](QuiescenceObject& self, const py::args&) {
+            self.release();
+            return false;
+        });
+
+    py::class_<RuntimeObject>(module, "Runtime",
+        "A scheduler holding a graph, and the subscriber on its message plane.\n\n"
+        "The graph runs on a thread the extension owns, one run at a time: run_and_wait(), start() and "
+        "run_in_thread() start a run, and each raises Error while a run is in progress. close() stops the run, joins "
+        "the thread and releases the runtime; the destructor does the same.\n\n"
+        "create(), run_and_wait(), start(), run_in_thread(), stop(), wait(), request_state(), close() and entering and "
+        "leaving a quiesce() block release the GIL, and so does the deallocation of a runtime. A call that waits in "
+        "the main thread runs the signal handlers every 100 ms, and Ctrl-C raises KeyboardInterrupt from it.")
+        .def_static(
+            "create",
+            [](GraphObject& graph, const std::optional<std::string>& type, const py::object& settings, const py::object& types) {
+                gr::property_map schedulerParameters = propertyMapFrom(settings, types);
+                if (graph.isView) {
+                    raiseError("Runtime.create takes a graph the RuntimeGraph owns, not a view", "Runtime.create");
+                }
+                std::ignore                     = graph.get();
+                const std::string schedulerType = type.value_or(std::string(gr::Runtime::kDefaultScheduler));
+                noteLoaderUse();
+                const std::vector<std::string> schedulerTypes = withoutGil([] { return gr::RuntimeGraph::availableSchedulerTypes(); });
+                if (std::ranges::find(schedulerTypes, schedulerType) == schedulerTypes.end()) {
+                    raiseError(std::format("unknown scheduler type '{}'; available_scheduler_types() lists the {} types there are", schedulerType, schedulerTypes.size()), "Runtime.create");
+                }
+                gr::RuntimeGraph consumed = std::move(*graph.graph);
+                graph.graph.reset();
+                auto        created = withoutGil([&] { return gr::Runtime::create(std::move(consumed), schedulerType, std::move(schedulerParameters)); });
+                gr::Runtime runtime = valueOrRaise(std::move(created));
+                auto        object  = std::make_unique<RuntimeObject>();
+                object->runtime     = std::shared_ptr<gr::Runtime>(new gr::Runtime(std::move(runtime)), DeleteWithoutGil<gr::Runtime>{});
+                return object;
+            },
+            py::arg("graph"), py::arg("type") = py::none(), py::arg("settings") = py::none(), py::arg("types") = py::none(),
+            "Instantiates the scheduler registered as type, the runtime's default when type is None, with the given "
+            "settings, and hands it the graph, which moves into the scheduler.")
+        .def(
+            "run_and_wait",
+            [](RuntimeObject& self) {
+                const std::shared_ptr<Run> run = self.start("Runtime.run_and_wait");
+                try {
+                    self.waitFor([&run] { return run->ended; }, std::nullopt);
+                } catch (const py::error_already_set&) {
+                    self.requestStop(*run);
+                    self.waitForEnd(run);
+                    throw;
+                }
+                withoutGil([&self] { self.joinEnded(); });
+                if (run->failure.has_value()) {
+                    raiseError(*run->failure);
+                }
+            },
+            "Runs the graph to its end on the extension's thread and waits for it. Ctrl-C stops the run, joins the thread "
+            "and raises KeyboardInterrupt; a run that fails raises its Error.")
+        .def(
+            "start", [](RuntimeObject& self) { std::ignore = self.start("Runtime.start"); },
+            "Runs the graph on the extension's thread, as run_in_thread() does, and returns. stop() ends the run; wait() "
+            "and result() report it.")
+        .def(
+            "stop",
+            [](RuntimeObject& self) {
+                std::ignore = self.acquire();
+                std::shared_ptr<Run> run;
+                {
+                    std::lock_guard lock(self.mutex);
+                    run = self.busy() ? self.current : nullptr;
+                }
+                if (run != nullptr) {
+                    self.requestStop(*run);
+                    self.waitForEnd(run);
+                }
+            },
+            "Stops the run on the extension's thread and waits for it to end. Without a run in progress it does nothing.")
+        .def(
+            "run_in_thread", [](RuntimeObject& self) { std::ignore = self.start("Runtime.run_in_thread"); }, "Runs the graph on the extension's thread and returns; wait() and result() report the run.")
+        .def(
+            "wait",
+            [](RuntimeObject& self, std::optional<double> timeout) {
+                if (timeout.has_value() && std::isnan(*timeout)) {
+                    throw py::value_error("wait() takes a timeout in seconds or None, got NaN");
+                }
+                std::optional<Clock::time_point> deadline;
+                if (timeout.has_value() && *timeout < kLongestTimedWait) {
+                    deadline = Clock::now() + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(std::max(*timeout, 0.0)));
+                }
+                std::shared_ptr<Run> run;
+                {
+                    std::lock_guard lock(self.mutex);
+                    run = self.current;
+                }
+                if (run == nullptr) {
+                    return true;
+                }
+                if (!self.waitFor([&run] { return run->ended; }, deadline)) {
+                    return false;
+                }
+                withoutGil([&self] { self.joinEnded(); });
+                return true;
+            },
+            py::arg("timeout") = py::none(),
+            "Waits for the last run on the extension's thread to end. Returns True when it has ended, False when timeout "
+            "seconds passed first. A NaN timeout raises ValueError; Ctrl-C raises KeyboardInterrupt and leaves the run "
+            "going.")
+        .def(
+            "result",
+            [](RuntimeObject& self) {
+                std::optional<gr::RuntimeError> failure;
+                bool                            ended = true;
+                {
+                    std::lock_guard lock(self.mutex);
+                    if (self.current != nullptr) {
+                        ended   = self.current->ended;
+                        failure = self.current->failure;
+                    }
+                }
+                if (!ended) {
+                    raiseError("the run has not ended; result() follows a wait() that returned True", "Runtime.result");
+                }
+                if (failure.has_value()) {
+                    raiseError(*failure);
+                }
+            },
+            "Returns None when the last run on the extension's thread ended normally, and raises its Error otherwise.")
+        .def_property_readonly(
+            "state", [](RuntimeObject& self) { return self.acquire()->state(); }, "The scheduler's lifecycle state.")
+        .def(
+            "request_state",
+            [](RuntimeObject& self, gr::Runtime::State state) {
+                const std::shared_ptr<gr::Runtime> held = self.acquire();
+                raiseIfFailed(withoutGil([&held, state] { return held->requestState(state); }));
+            },
+            py::arg("state"), "Requests a lifecycle transition of the scheduler.")
+        .def(
+            "poll_events", [](RuntimeObject& self, std::size_t maxEvents) { return self.acquire()->pollEvents(maxEvents); }, py::arg("max_events") = 64U, "Returns what the graph reported since the last call, oldest first, at most max_events of it.")
+        .def(
+            "send",
+            [](RuntimeObject& self, gr::RuntimeCommand command, const std::string& service, const std::string& endpoint, const py::object& payload, const std::string& clientRequestId, const py::object& types) { //
+                gr::property_map                   message = propertyMapFrom(payload, types);
+                const std::shared_ptr<gr::Runtime> held    = self.acquire();
+                raiseIfFailed(held->send(command, service, endpoint, std::move(message), clientRequestId));
+            },
+            py::arg("command"), py::arg("service"), py::arg("endpoint"), py::arg("payload") = py::none(), py::arg("client_request_id") = "", py::arg("types") = py::none(),
+            "Sends one message to the scheduler's message input, addressed to service (a block's unique name) and "
+            "endpoint; types maps a payload key to its type code. A message sent while the input is full is dropped and "
+            "send() returns normally; a request dropped that way gets no reply, and a caller waiting for one times out.")
+        .def(
+            "quiesce", [](const py::object& owner) { return std::make_unique<QuiescenceObject>(owner, &owner.cast<RuntimeObject&>()); }, "Returns a context manager that quiesces the work loop for a live graph edit.")
+        .def(
+            "graph", [](RuntimeObject& self) { return holdWithoutGil(GraphObject{.graph = self.acquire()->graph(), .isView = true}); }, "Returns a view of the graph the scheduler holds.")
+        .def(
+            "scheduler", [](RuntimeObject& self) { return self.acquire()->scheduler(); }, "Returns the scheduler as a block, for its own settings.")
+        .def(
+            "close",
+            [](RuntimeObject& self) {
+                std::shared_ptr<Run> run;
+                bool                 quiesced = false;
+                {
+                    std::lock_guard lock(self.mutex);
+                    quiesced = self.quiescing > 0UZ;
+                    if (!quiesced) {
+                        self.closing = true;
+                        run          = self.busy() ? self.current : nullptr;
+                    }
+                }
+                if (quiesced) {
+                    raiseError("close() inside a quiesce() block", "Runtime.close");
+                }
+                if (run != nullptr) {
+                    self.requestStop(*run);
+                    self.waitFor([&run] { return run->ended; }, std::nullopt);
+                }
+                withoutGil([&self] { self.release(); });
+            },
+            "Stops the run on the extension's thread, joins the thread and releases the runtime. A call on a closed "
+            "runtime does nothing.");
+}
+
 } // namespace
 
 PYBIND11_MODULE(_gr4, module) {
@@ -1137,9 +1589,12 @@ PYBIND11_MODULE(_gr4, module) {
 
     defineErrorClass(module);
     py::register_local_exception_translator(&translateException);
+    defineEnumerations(module);
     defineBlockHandle(module);
     definePortAndEdge(module);
     defineRuntimeGraph(module);
+    defineRuntimeEvent(module);
+    defineRuntime(module);
 
     module.attr("DEFAULT_SCHEDULER") = std::string(gr::Runtime::kDefaultScheduler);
     module.def(
