@@ -41,9 +41,12 @@ sink = g.add("gr::blocks::fileio::BasicFileSink<float32>", "sink", file_name="/t
 g.connect(src, head, sink)
 g.run()
 
-sched = gr4.Scheduler(g, "gr::scheduler::Simple<multiThreaded>", timeout_ms=50)
+live = gr4.Graph()
+tone = live.add("gr::blocks::basic::SignalGenerator<float32>", "tone", sample_rate=48_000, tone_frequency=440)
+live.connect(tone, live.add("gr::blocks::testing::NullSink<float32>", "sink"))
+sched = gr4.Scheduler(live, "gr::scheduler::Simple<multiThreaded>", timeout_ms=50)
 with sched.start():
-    src.settings["tone_frequency"] = 880.0
+    tone.settings["tone_frequency"] = 880.0
     for event in sched.events(timeout=2.0):
         print(event)
 ```
@@ -91,8 +94,9 @@ rather than ending the interpreter.
 `gr4.Scheduler(graph, type=None, **settings)` instantiates the scheduler by key (the runtime's default when
 `type` is None) and takes the graph. `run()` runs to the end and returns; `start()` returns at once and is a
 context manager that stops on exit; `stop()`, `pause()`, `resume()`, `wait(timeout=None)`, `state`
-(`gr4.State`), `settings` (the scheduler's own, like a block's), `events()`, `errors`, `send()` and
-`request()`. A stopped scheduler can run again: `runAndWait()` accepts one in the stopped state, and a test
+(`gr4.State`), `settings` (the scheduler's own; they are set when the scheduler is created, and staging one is
+refused, because the core applies a scheduler's staged settings only in its constructor), `events()`, `errors`,
+`send()` and `request()`. A stopped scheduler can run again: `runAndWait()` accepts one in the stopped state, and a test
 pins that the blocks run a second time. `graph.run(scheduler=None, **settings)` creates one and runs it.
 
 ### Events, requests and subscriptions
