@@ -162,9 +162,7 @@ class RunInThread(unittest.TestCase):
         run = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True, timeout=60)
         self.assertEqual(run.returncode, 0, run.stderr)
         refused, ended = run.stdout.splitlines()
-        self.assertTrue(
-            refused.startswith("refused Runtime.run_in_thread the extension's thread did not start"), refused
-        )
+        self.assertTrue(refused.startswith("refused Runtime.run_in_thread the run's thread did not start"), refused)
         self.assertEqual(ended, "next run ended True")
 
 
