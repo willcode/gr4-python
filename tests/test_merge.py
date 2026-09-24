@@ -136,6 +136,45 @@ class MergeIntoDocument(unittest.TestCase):
             _gr4.merge_parameters(malformed, {"sink": {}})
 
 
+class DocumentBlockTypes(unittest.TestCase):
+    """document_block_types() finds an entry as the merge does and reads the type the loader instantiates."""
+
+    def test_a_block_a_block_inside_a_subgraph_and_a_nested_scheduler_give_their_registry_keys(self):
+        graph = _gr4.RuntimeGraph()
+        graph.emplace(HEAD, "head")
+        subgraph = graph.emplace_subgraph("inner")
+        graph.interior(subgraph).emplace(COPY, "inner_copy")
+        graph.emplace(_gr4.DEFAULT_SCHEDULER, "nested")
+        found = _gr4.document_block_types(graph.to_yaml(), ["head", "inner_copy", "nested"])
+        self.assertEqual(found, {"head": HEAD, "inner_copy": COPY, "nested": _gr4.DEFAULT_SCHEDULER})
+
+    def test_a_block_is_found_by_its_unique_name_and_an_entry_without_id_gives_an_empty_type(self):
+        document = f"blocks:\n  - id: {HEAD}\n    unique_name: head-17\n  - unique_name: bare\n"
+        self.assertEqual(_gr4.document_block_types(document, ["head-17", "bare"]), {"head-17": HEAD, "bare": ""})
+
+    def test_a_name_the_merge_refuses_raises_the_merge_s_error(self):
+        twins = _gr4.RuntimeGraph()
+        twins.emplace(HEAD, "twin")
+        twins.emplace(HEAD, "twin")
+        plain = _gr4.RuntimeGraph()
+        plain.emplace_subgraph("plain")
+        malformed = 'blocks:\n  - id: gr::blocks::testing::NullSink<float32>\n    parameters:\n      name: "sink\n'
+        cases = {
+            "tail": counted_chain("unused.f32").to_yaml(),
+            "twin": twins.to_yaml(),
+            "plain": plain.to_yaml(),
+            "sink": malformed,
+        }
+        for name, document in cases.items():
+            with self.subTest(name=name):
+                with self.assertRaises(_gr4.Error) as merged:
+                    _gr4.merge_parameters(document, {name: {}})
+                with self.assertRaises(_gr4.Error) as typed:
+                    _gr4.document_block_types(document, [name])
+                self.assertEqual(typed.exception.message, merged.exception.message)
+                self.assertEqual(typed.exception.where, "document_block_types")
+
+
 if __name__ == "__main__":
     # os._exit skips static destruction in the core and plugin libraries, whose order across libraries is unspecified
     program = unittest.main(exit=False, verbosity=2)
