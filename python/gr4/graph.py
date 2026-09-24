@@ -1,21 +1,31 @@
-"""Graphs of blocks built by registry key, their blocks, ports and edges, and graph documents."""
+"""Graphs of blocks built by registry key, their blocks, ports and edges, and graph documents.
+
+A Graph owns its blocks until a Scheduler takes it; from then on the Graph views the scheduler's graph and stays
+usable for inspection and settings. A structural edit while the scheduler runs raises GraphBusyError, and one after the
+scheduler is closed raises SchedulerError.
+"""
 
 import dataclasses
 import os
 from collections.abc import Iterator, Mapping
-from typing import TextIO
+from typing import TYPE_CHECKING, TextIO
 
 from . import _gr4, registry
 from .errors import (
     Error,
+    GraphBusyError,
     GraphFileError,
     PortError,
+    SchedulerError,
     SettingError,
     UnknownBlockType,
     translated,
 )
 from .registry import BlockType, Port
 from .values import Settings, coercion_types, unknown_setting
+
+if TYPE_CHECKING:
+    from .scheduler import Scheduler, Subscription
 
 __all__ = ["Block", "Edge", "Graph"]
 
@@ -84,6 +94,21 @@ class Block:
         """The Graph inside a subgraph or a nested scheduler. Error for any other block."""
         return Graph._view(self._graph._graph.interior(self._handle), self._graph._root)
 
+    def request(
+        self,
+        endpoint: str,
+        payload: Mapping[str, object] | None = None,
+        command: _gr4.Command = _gr4.Command.GET,
+        timeout: float = 1.0,
+    ) -> dict[str, object]:
+        """Sends one request to the block and returns the data of its reply; see Scheduler.request()."""
+        scheduler = self._graph._scheduler_or_raise("a request")
+        return scheduler.request(self, endpoint, payload, command, timeout)
+
+    def subscribe(self, endpoint: str, callback=None) -> "Subscription":
+        """Subscribes to the block's notifications on endpoint; see Scheduler.subscribe()."""
+        return self._graph._scheduler_or_raise("a subscription").subscribe(self, endpoint, callback)
+
     def __eq__(self, other: object) -> bool:
         """True when both name the same block."""
         return isinstance(other, Block) and other._handle == self._handle
@@ -120,7 +145,10 @@ def _read_document(path_or_file: str | os.PathLike | TextIO) -> str:
 class Graph:
     """A flow graph built by registry key.
 
-    add() instantiates blocks, connect() joins their ports, and to_yaml() writes the graph as a document.
+    add() instantiates blocks, connect() joins their ports, and run() or a Scheduler runs the graph. A graph handed to a
+    Scheduler moves into it: the Graph then views the scheduler's graph. The structural edits, add(), add_subgraph(),
+    connect(), disconnect(), remove(), export() and unexport(), raise GraphBusyError while the scheduler runs and
+    SchedulerError once it is closed.
     """
 
     def __init__(self) -> None:
@@ -128,12 +156,14 @@ class Graph:
         registry._note_loader_use()
         self._graph = _gr4.RuntimeGraph()
         self._root = self
+        self._scheduler: "Scheduler | None" = None
 
     @classmethod
     def _view(cls, runtime_graph: _gr4.RuntimeGraph, root: "Graph") -> "Graph":
         view = cls.__new__(cls)
         view._graph = runtime_graph
         view._root = root
+        view._scheduler = None
         return view
 
     @classmethod
@@ -167,6 +197,7 @@ class Graph:
         with translated(GraphFileError):
             graph._graph = _gr4.RuntimeGraph.from_yaml(text)
         graph._root = graph
+        graph._scheduler = None
         return graph
 
     @classmethod
@@ -177,8 +208,32 @@ class Graph:
         return cls.from_yaml(_read_document(path_or_file), settings)
 
     def to_yaml(self) -> str:
-        """Writes the graph as a graph document."""
+        """Writes the graph as a graph document.
+
+        On a graph a scheduler is running, the document is the reply of the scheduler's GraphGRC endpoint, which
+        describes the whole graph; the interior of a block of a running graph raises GraphBusyError.
+        """
+        scheduler = self._root._scheduler
+        if scheduler is not None and scheduler._in_run():
+            if self._root is not self:
+                raise GraphBusyError("the document of a running graph is the whole graph's", "Graph.to_yaml")
+            return scheduler.request(scheduler, "GraphGRC")["value"]
         return self._graph.to_yaml()
+
+    def _scheduler_or_raise(self, what: str) -> "Scheduler":
+        scheduler = self._root._scheduler
+        if scheduler is None:
+            raise SchedulerError(f"{what} needs the graph to belong to a Scheduler", "Graph")
+        return scheduler
+
+    def _check_idle(self, operation: str) -> None:
+        scheduler = self._root._scheduler
+        if scheduler is None:
+            return
+        if scheduler._closed:
+            raise SchedulerError(f"{operation}() is a structural edit, and the graph's scheduler is closed", "Graph")
+        if scheduler._in_run():
+            raise GraphBusyError(f"{operation}() is a structural edit, and the graph's scheduler is running", "Graph")
 
     def _block(self, handle: _gr4.BlockHandle) -> Block:
         return Block(self, handle)
@@ -200,6 +255,7 @@ class Graph:
         raising TypeError or OverflowError when it does not fit. strict=False passes the settings as they are. meta is
         merged into the block's meta-information.
         """
+        self._check_idle("add")
         key = type.key if isinstance(type, BlockType) else type
         types = None
         if strict:
@@ -222,6 +278,7 @@ class Graph:
 
     def add_subgraph(self, name: str) -> Block:
         """Adds an empty nested graph and returns it; its interior is the Graph to add blocks to."""
+        self._check_idle("add_subgraph")
         return self._block(self._graph.emplace_subgraph(name))
 
     def _end(self, end: Port | Block, direction: str) -> Port:
@@ -261,6 +318,7 @@ class Graph:
         and a pair of different types raises PortError naming both. Every end and every pair is checked before any
         edge is made. buffer_size is the minimum buffer the edge holds, the framework's default when None.
         """
+        self._check_idle("connect")
         chain = [source, destination, *more]
         pairs = [(self._end(chain[i], "output"), self._end(chain[i + 1], "input")) for i in range(len(chain) - 1)]
         for pair in pairs:
@@ -287,21 +345,25 @@ class Graph:
 
     def disconnect(self, source: Port | Block, destination: Port | Block) -> None:
         """Removes the edge between two ends, each given as connect() takes it."""
+        self._check_idle("disconnect")
         out, into = self._end(source, "output"), self._end(destination, "input")
         with translated(PortError):
             self._graph.disconnect(out.block._handle, out.name, into.block._handle, into.name)
 
     def remove(self, block: Block) -> None:
         """Removes a block and its edges; the Block then reports valid as False."""
+        self._check_idle("remove")
         self._graph.remove(block._handle)
 
     def export(self, port: Port, name: str) -> None:
         """Publishes a port of a block of this interior on the subgraph that holds it, under name."""
+        self._check_idle("export")
         with translated(PortError):
             self._graph.export_port(port.block._handle, port.direction == "input", port.name, name)
 
     def unexport(self, port: Port) -> None:
         """Withdraws a port export() published."""
+        self._check_idle("unexport")
         with translated(PortError):
             self._graph.unexport_port(port.block._handle, port.direction == "input", port.name)
 
@@ -344,6 +406,27 @@ class Graph:
             for edge in self._graph.edges()
         ]
 
+    @property
+    def scheduler(self) -> "Scheduler | None":
+        """The Scheduler the graph moved into, or None."""
+        return self._root._scheduler
+
+    def run(self, scheduler: str | None = None, **settings: object) -> None:
+        """Runs the graph to the end.
+
+        The first run creates a Scheduler of the type scheduler names, the default when None, with settings; a later
+        run runs that scheduler again and takes neither argument. See Scheduler.run().
+        """
+        from .scheduler import Scheduler
+
+        if self._root is not self:
+            raise SchedulerError("run() runs a whole graph, not the interior of a block", "Graph.run")
+        if self._scheduler is None:
+            Scheduler(self, scheduler, **settings)
+        elif scheduler is not None or settings:
+            raise SchedulerError("the graph belongs to a scheduler already; run it without arguments", "Graph.run")
+        self._scheduler.run()
+
     def __iter__(self) -> Iterator[Block]:
         """Iterates over the blocks of this level of the graph."""
         return iter(self.blocks())
@@ -357,5 +440,6 @@ class Graph:
         return isinstance(block, Block) and block._handle in self._graph.blocks()
 
     def __repr__(self) -> str:
-        """Names the number of blocks."""
-        return f"<Graph of {len(self)} blocks>"
+        """Names the number of blocks, and the scheduler when the graph belongs to one."""
+        where = f" in {self._root._scheduler!r}" if self._root._scheduler is not None else ""
+        return f"<Graph of {len(self)} blocks{where}>"

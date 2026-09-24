@@ -295,6 +295,40 @@ class Documents(TemporaryFiles):
             gr4.Graph.from_yaml(gr4.Graph().to_yaml(), settings={"absent": {"x": 1}})
 
 
+class Runs(TemporaryFiles):
+    """A graph built here runs to the end: a head block of N samples writes N samples."""
+
+    def test_a_head_block_of_n_samples_writes_n_samples_of_the_tone(self):
+        for samples in (1000, 4096 + 3):
+            with self.subTest(samples=samples):
+                path = self.path(f"tone-{samples}.f32")
+                graph, *_ = tone_chain(path, samples, amplitude=0.5)
+                graph.run()
+                written = read_float32(path)
+                self.assertEqual(len(written), samples)
+                self.assertLessEqual(max(abs(sample) for sample in written), 0.5)
+                self.assertGreater(max(abs(sample) for sample in written), 0.25)
+
+    def test_an_exported_interior_port_carries_samples_through_a_subgraph(self):
+        direct, through = self.path("direct.f32"), self.path("through.f32")
+        graph = gr4.Graph()
+        head = graph.add(gr4.registry.find("HeadBlock", "float32"), "head", n_samples_max=1000)
+        graph.connect(graph.add(COUNTING_SOURCE, "source"), head, graph.add(FILE_SINK, "sink", file_name=direct))
+        graph.run()
+        subgraph_chain(through)[0].run()
+        self.assertEqual(len(read_float32(through)), 1000)
+        self.assertEqual(read_float32(through), read_float32(direct))
+
+    def test_settings_given_to_load_are_in_force_at_start(self):
+        merged = self.path("merged.f32")
+        loaded = gr4.Graph.load(
+            save_chain(self, 1000), settings={"head": {"n_samples_max": 777}, "sink": {"file_name": merged}}
+        )
+        loaded.run()
+        self.assertEqual(len(read_float32(merged)), 777)
+        self.assertFalse(os.path.exists(self.path("saved.f32")))
+
+
 if __name__ == "__main__":
     # os._exit skips static destruction in the core and plugin libraries, whose order across libraries is unspecified
     program = unittest.main(exit=False, verbosity=2)
