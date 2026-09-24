@@ -16,7 +16,7 @@ A value converts back to Python scalars, lists nested by a tensor's extents, dic
 """
 
 import enum
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from types import TracebackType
 from typing import Final, TypeAlias
 
@@ -484,6 +484,15 @@ def merge_parameters(
     value it holds; one not held takes the type code types gives it (block name to key to code), or the type its
     Python value selects. A name no entry carries, or one two entries carry, raises Error; so does a document that
     does not parse, naming the line and column.
+    """
+
+def document_block_types(document: str, names: Iterable[str]) -> dict[str, str]:
+    """Maps each of names to the type of the block entry of a graph document that carries the name.
+
+    Entries are named as merge_parameters() names them. The type of a block is the id of its entry, and that of a
+    subgraph with a scheduler the id of the scheduler; an entry without an id gives ''. A name no entry carries, one
+    two entries carry, or one of a subgraph without a scheduler raises Error; so does a document that does not parse,
+    naming the line and column.
     """
 
 def convert(obj: object, type_code: str | None = None) -> _Value:
