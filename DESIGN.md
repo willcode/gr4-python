@@ -131,8 +131,8 @@ it needs. That also removes two refusals of the settings code: an integer wider 
 convert to that float, so `sample_rate=20_000_000` on a `float32` setting fails without coercion, and a complex
 value never changes precision, so a Python `complex` fails on a `complex<float32>` setting.
 
-With `strict=True`, a key the block does not declare raises `KeyError` naming the closest declared keys; at
-construction the framework would otherwise file it as meta-information and report nothing. Meta-information is
+With `strict=True`, a key the block does not declare raises `KeyError` naming the closest declared keys before
+the block is constructed; without it, construction itself refuses the key and names no alternative. Meta-information is
 passed on purpose through `meta=`, and `strict=False` skips the description and the coercion.
 
 `pmt::Value` to Python: scalars to Python scalars, tensors to lists, maps to dicts, enumerations as their
