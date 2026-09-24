@@ -1,6 +1,6 @@
 """Schedulers: running a graph, stopping it, and the events, requests and subscriptions of its message plane.
 
-A Scheduler takes a Graph and runs it on a thread the extension owns. Every call that waits (run, wait, events,
+A Scheduler takes a Graph and runs it on a thread the runtime owns. Every call that waits (run, wait, events,
 request) drains what the graph reported: a reply goes to the request that waits for it, an error event to errors and to
 the queue events() reads, and every other event to that queue, which holds EVENT_QUEUE_LENGTH events and drops the
 oldest. A reply that arrives after its request timed out is dropped. The notifications of a subscription with a
@@ -305,7 +305,7 @@ class Scheduler:
         self._finish()
 
     def start(self) -> "Scheduler":
-        """Starts the graph on the extension's thread and returns the scheduler, a context manager that stops it.
+        """Starts the graph on the runtime's thread and returns the scheduler, a context manager that stops it.
 
         The context manager raises RunError on exit when the run ended in error.
         """

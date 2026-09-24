@@ -15,9 +15,10 @@ and ZeroMQ blocks cover that today.
 The bindings sit on the type-erased runtime of `gnuradio4-core` (`gnuradio-4.0/Runtime.hpp`): `RuntimeGraph`
 builds and inspects a graph by name, `BlockHandle` is the settings surface of one block, and `Runtime` owns a
 scheduler instantiated by name and the subscriber on its message output. That header instantiates no framework
-template and every call returns `std::expected`, so the extension is one translation unit that maps those
-classes one to one and converts values. It requires the willcode fork of `gnuradio4-core` built with
-`GR_ENABLE_BLOCK_REGISTRY` on; upstream main does not carry the runtime.
+template, and every call returns `std::expected`. The extension is one translation unit: it binds each of those
+classes as one Python class, converts values, and merges settings into a graph document. It requires the
+willcode fork of `gnuradio4-core` built with `GR_ENABLE_BLOCK_REGISTRY` on; upstream main does not carry the
+runtime.
 
 The extension must be built with the same compiler family as the installed `gnuradio-core`, a constraint the
 runtime header states for every consumer.
@@ -149,10 +150,10 @@ applies it, so the bindings stage.
 
 ## Threads, interrupts and lifetime
 
-- `run()` and `start()` share one mechanism: a thread owned by the extension calls `runAndWait()` and keeps its
-  result, which `wait()` returns or raises as `RunError`. `Runtime::start()` discards that result.
-- `run()` waits in slices with the GIL released; on `KeyboardInterrupt` it stops the graph, joins it and
-  raises again.
+- `run()` and `start()` share one mechanism: `Runtime::start()` runs `runAndWait()` on a thread the runtime owns
+  and keeps its result, which `wait()` returns or raises as `RunError`.
+- `run()` waits in slices with the GIL released; on `KeyboardInterrupt` it stops the graph, waits for the run's
+  end and raises again. `stop()` waits inside `Runtime::stop()` until the run has ended.
 - Events are drained by every call that waits (`run`, `wait`, `events`, `request`) and by the dispatch thread
   while one exists.
 - An `atexit` hook stops and joins every live scheduler before the interpreter and the plugin loader are torn
@@ -189,14 +190,14 @@ knowledge file, so the set can be reviewed and submitted with the runtime itself
 The control plane reaches the core through its typed headers. Everything it does with them has an equivalent
 here:
 
-| the control plane | here |
-|---|---|
-| `loadGrc` of a document it rewrote with `pmt::yaml` | `Graph.from_yaml`, with `settings` for the rewrite that injects parameters |
-| scheduler by name, from a preference list | `gr4.Scheduler(graph, type)`, `registry.scheduler_types()` |
-| scheduler start and stop | `start`, `stop`, `run`, plus `pause`, `resume`, `wait` |
-| block settings read and written by message, staged or immediate | `block.settings` directly, or `block.request` on either endpoint |
-| block catalog: settings, meta-information, ports with collections | `registry[key]` and `describe_all()` |
-| plugin directories chosen by the server | `GNURADIO4_PLUGIN_DIRECTORIES`, `gr4.configure` |
+| the control plane                                                 | here                                                                       |
+| ----------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| `loadGrc` of a document it rewrote with `pmt::yaml`               | `Graph.from_yaml`, with `settings` for the rewrite that injects parameters |
+| scheduler by name, from a preference list                         | `gr4.Scheduler(graph, type)`, `registry.scheduler_types()`                 |
+| scheduler start and stop                                          | `start`, `stop`, `run`, plus `pause`, `resume`, `wait`                     |
+| block settings read and written by message, staged or immediate   | `block.settings` directly, or `block.request` on either endpoint           |
+| block catalog: settings, meta-information, ports with collections | `registry[key]` and `describe_all()`                                       |
+| plugin directories chosen by the server                           | `GNURADIO4_PLUGIN_DIRECTORIES`, `gr4.configure`                            |
 
 Two things it does are not core access and are not repeated: registering typed scheduler aliases (a Python
 program names the registered keys instead), and its managed streams, which proxy a sink block's HTTP or

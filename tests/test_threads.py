@@ -1,4 +1,4 @@
-"""Tests of runs on the extension's thread, of stops and closes from other Python threads, of Ctrl-C, and of the GIL
+"""Tests of runs on the runtime's thread, of stops and closes from other Python threads, of Ctrl-C, and of the GIL
 during a run."""
 
 import os
@@ -62,7 +62,7 @@ def finish(test, *workers):
 
 
 class RunInThread(unittest.TestCase):
-    """run_in_thread() runs on a thread the extension owns, and wait() blocks without the GIL."""
+    """run_in_thread() runs on a thread the runtime owns, and wait() blocks without the GIL."""
 
     def setUp(self):
         self.runtime = _gr4.Runtime.create(endless_graph())

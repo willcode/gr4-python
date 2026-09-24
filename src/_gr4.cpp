@@ -1284,12 +1284,14 @@ void defineRuntime(py::module_& module) {
 
     py::class_<RuntimeObject>(module, "Runtime",
         "A scheduler holding a graph, and the subscriber on its message plane.\n\n"
-        "The graph runs on a thread the extension owns, one run at a time: run_and_wait(), start() and "
-        "run_in_thread() start a run, and each raises Error while a run is in progress. close() stops the run, joins "
-        "the thread and releases the runtime; the destructor does the same.\n\n"
+        "The runtime runs the graph on a thread it owns, one run at a time, and keeps the last run's result: "
+        "run_and_wait(), start() and run_in_thread() start a run, and each raises Error while a run is in progress. "
+        "close() stops the run, waits for its end and releases the runtime; the destructor does the same.\n\n"
         "create(), run_and_wait(), start(), run_in_thread(), stop(), wait(), request_state(), close() and entering and "
-        "leaving a quiesce() block release the GIL, and so does the deallocation of a runtime. A call that waits in "
-        "the main thread runs the signal handlers every 100 ms, and Ctrl-C raises KeyboardInterrupt from it.")
+        "leaving a quiesce() block release the GIL, and so does the deallocation of a runtime. run_and_wait() and "
+        "wait() run the signal handlers every 100 ms while they wait in the main thread, and Ctrl-C raises "
+        "KeyboardInterrupt from them. stop() and close() wait inside the runtime until the run has ended, and the "
+        "signal handlers run after they return.")
         .def_static(
             "create",
             [](GraphObject& graph, const std::optional<std::string>& type, const py::object& settings, const py::object& types) {
@@ -1327,11 +1329,11 @@ void defineRuntime(py::module_& module) {
                 }
                 raiseIfFailed(held->result());
             },
-            "Runs the graph to its end on the extension's thread and waits for it. Ctrl-C stops the run, joins the thread "
+            "Runs the graph to its end on the runtime's thread and waits for it. Ctrl-C stops the run, waits for its end "
             "and raises KeyboardInterrupt; a run that fails raises its Error.")
         .def(
             "start", [](RuntimeObject& self) { std::ignore = self.start("Runtime.start"); },
-            "Runs the graph on the extension's thread, as run_in_thread() does, and returns. stop() ends the run; wait() "
+            "Runs the graph on the runtime's thread, as run_in_thread() does, and returns. stop() ends the run; wait() "
             "and result() report it.")
         .def(
             "stop",
@@ -1339,9 +1341,9 @@ void defineRuntime(py::module_& module) {
                 const std::shared_ptr<gr::Runtime> held = self.acquire();
                 withoutGil([&held] { held->stop(); });
             },
-            "Stops the run on the extension's thread and waits for it to end. Without a run in progress it does nothing.")
+            "Stops the run in progress and waits for it to end. Without a run in progress it does nothing.")
         .def(
-            "run_in_thread", [](RuntimeObject& self) { std::ignore = self.start("Runtime.run_in_thread"); }, "Runs the graph on the extension's thread and returns; wait() and result() report the run.")
+            "run_in_thread", [](RuntimeObject& self) { std::ignore = self.start("Runtime.run_in_thread"); }, "Runs the graph on the runtime's thread and returns; wait() and result() report the run.")
         .def(
             "wait",
             [](RuntimeObject& self, std::optional<double> timeout) {
@@ -1360,11 +1362,11 @@ void defineRuntime(py::module_& module) {
                 return held == nullptr || waitForRun(*held, deadline);
             },
             py::arg("timeout") = py::none(),
-            "Waits for the last run on the extension's thread to end. Returns True when it has ended, False when timeout "
-            "seconds passed first. A NaN timeout raises ValueError; Ctrl-C raises KeyboardInterrupt and leaves the run "
+            "Waits for the last run to end. Returns True when it has ended, False when timeout seconds passed first. "
+            " A NaN timeout raises ValueError; Ctrl-C raises KeyboardInterrupt and leaves the run "
             "going.")
         .def(
-            "result", [](RuntimeObject& self) { raiseIfFailed(self.result()); }, "Returns None when the last run on the extension's thread ended normally, and raises its Error otherwise.")
+            "result", [](RuntimeObject& self) { raiseIfFailed(self.result()); }, "Returns None when the last run ended normally, and raises its Error otherwise. While a run is in progress it raises Error, and after a start whose thread did not start it raises that start's Error. After close() it reports the last run before the close.")
         .def_property_readonly(
             "state", [](RuntimeObject& self) { return self.acquire()->state(); }, "The scheduler's lifecycle state.")
         .def(
@@ -1424,8 +1426,8 @@ void defineRuntime(py::module_& module) {
                     held.reset();
                 });
             },
-            "Stops the run on the extension's thread, joins the thread and releases the runtime. A call on a closed "
-            "runtime does nothing.");
+            "Stops the run in progress, waits for its end and releases the runtime. A call on a closed runtime does "
+            "nothing.");
 }
 
 /// The key order of the graph writer; a merged document lists its keys in the order `to_yaml()` uses.
