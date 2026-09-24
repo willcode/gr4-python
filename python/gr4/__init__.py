@@ -17,13 +17,17 @@ from .errors import (
     Timeout,
     UnknownBlockType,
 )
+from .graph import Block, Edge, Graph
 from .registry import DEFAULT_SCHEDULER, BlockType, Port, Setting, configure
 from .values import Settings
 
 __all__ = [
     "DEFAULT_SCHEDULER",
+    "Block",
     "BlockType",
+    "Edge",
     "Error",
+    "Graph",
     "GraphBusyError",
     "GraphFileError",
     "Port",
