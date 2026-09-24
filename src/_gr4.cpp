@@ -10,6 +10,7 @@
 #include <gnuradio-4.0/Tag.hpp>
 #include <gnuradio-4.0/Tensor.hpp>
 #include <gnuradio-4.0/Value.hpp>
+#include <gnuradio-4.0/YamlPmt.hpp>
 
 #include <pybind11/native_enum.h>
 #include <pybind11/pybind11.h>
@@ -30,6 +31,7 @@
 #include <expected>
 #include <format>
 #include <functional>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -1571,6 +1573,139 @@ void defineRuntime(py::module_& module) {
             "runtime does nothing.");
 }
 
+/// The key order of the graph writer; a merged document lists its keys in the order `to_yaml()` uses.
+constexpr std::array<std::string_view, 13> kDocumentKeyOrder{"id", "version", "name", "unique_name", "block_category", "meta_information", "parameters", "ctx_parameters", "scheduler", "exported_ports", "blocks", "connections", "graph"};
+
+/// One block entry of a graph document and the two names it carries.
+struct DocumentBlock {
+    Value::Map* entry      = nullptr;
+    std::string name       = {};    // parameters.name, or the top-level name of a subgraph without one
+    std::string uniqueName = {};    // unique_name
+    bool        isSubgraph = false; // id: SUBGRAPH
+
+    [[nodiscard]] std::string_view label() const { return name.empty() ? std::string_view(uniqueName) : std::string_view(name); }
+};
+
+/// Collects the block entries of a document's `blocks` list, and of the `blocks` list of every entry's `graph`, at
+/// any depth.
+void collectDocumentBlocks(Value::Map& graph, std::vector<DocumentBlock>& found) {
+    const auto blocksIt = graph.find("blocks");
+    auto*      blocks   = blocksIt == graph.end() ? nullptr : blocksIt->second.get_if<gr::Tensor<Value>>();
+    if (blocks == nullptr) {
+        return;
+    }
+    for (Value& block : *blocks) {
+        auto* entry = block.get_if<Value::Map>();
+        if (entry == nullptr) {
+            continue;
+        }
+        DocumentBlock described{.entry = entry};
+        if (const auto idIt = entry->find("id"); idIt != entry->end()) {
+            described.isSubgraph = idIt->second.value_or(std::string()) == "SUBGRAPH";
+        }
+        bool namedInParameters = false;
+        if (const auto parametersIt = entry->find("parameters"); parametersIt != entry->end()) {
+            if (const auto* parameters = parametersIt->second.get_if<Value::Map>(); parameters != nullptr) {
+                if (const auto nameIt = parameters->find("name"); nameIt != parameters->end()) {
+                    described.name    = nameIt->second.value_or(std::string());
+                    namedInParameters = true;
+                }
+            }
+        }
+        if (const auto nameIt = entry->find("name"); described.isSubgraph && !namedInParameters && nameIt != entry->end()) {
+            described.name = nameIt->second.value_or(std::string());
+        }
+        if (const auto uniqueNameIt = entry->find("unique_name"); uniqueNameIt != entry->end()) {
+            described.uniqueName = uniqueNameIt->second.value_or(std::string());
+        }
+        found.push_back(std::move(described));
+        if (const auto graphIt = entry->find("graph"); graphIt != entry->end()) {
+            if (auto* interior = graphIt->second.get_if<Value::Map>(); interior != nullptr) {
+                collectDocumentBlocks(*interior, found);
+            }
+        }
+    }
+}
+
+std::string joinLabels(const std::vector<const DocumentBlock*>& blocks) {
+    std::string joined;
+    for (const DocumentBlock* block : blocks) {
+        joined += std::format("{}'{}'", joined.empty() ? "" : ", ", block->label());
+    }
+    return joined.empty() ? std::string("none") : joined;
+}
+
+/// Sets `settings` (block name to key to value) in the block entries of a graph document and writes the document
+/// again, with its type tags. A block is named by `parameters.name` or `unique_name`, and a subgraph without
+/// `parameters.name` by its top-level `name`, as the graph loader names them. The settings of a block go to the
+/// entry's `parameters`, and those of a subgraph with a scheduler to `scheduler.parameters`, where the loader reads
+/// them; a subgraph without a scheduler takes no settings. A parameter held there takes the type of the value it
+/// holds; one not held takes the type code `types` gives it (block name to key to code), or the type its Python value
+/// selects.
+std::string mergeParameters(const std::string& document, const py::dict& settings, const py::object& types) {
+    if (!types.is_none() && !PyDict_Check(types.ptr())) {
+        throw py::type_error(std::format("types need a dict of block names to dicts of type codes, got {}", typeNameOf(types)));
+    }
+    auto parsed = withoutGil([&document] { return gr::pmt::yaml::deserialize(document); });
+    if (!parsed.has_value()) {
+        raiseError(std::format("line {}, column {}: {}", parsed.error().line, parsed.error().column, parsed.error().message), "merge_parameters");
+    }
+
+    std::vector<DocumentBlock> blocks;
+    collectDocumentBlocks(*parsed, blocks);
+    std::vector<const DocumentBlock*> everyBlock;
+    std::ranges::transform(blocks, std::back_inserter(everyBlock), [](const DocumentBlock& block) { return &block; });
+
+    for (const auto& [blockKey, parameters] : settings) {
+        const std::string blockName = stringFrom(blockKey, Subject{});
+        if (!PyDict_Check(parameters.ptr())) {
+            throw py::type_error(std::format("the settings of '{}' need a dict, got {}", blockName, typeNameOf(parameters)));
+        }
+        std::vector<const DocumentBlock*> carriers;
+        std::ranges::copy_if(everyBlock, std::back_inserter(carriers), [&blockName](const DocumentBlock* block) { return block->name == blockName || block->uniqueName == blockName; });
+        if (carriers.empty()) {
+            raiseError(std::format("no block of the document is named '{}'; its blocks are {}", blockName, joinLabels(everyBlock)), "merge_parameters");
+        }
+        if (carriers.size() > 1UZ) {
+            raiseError(std::format("{} blocks of the document are named '{}': {}", carriers.size(), blockName, joinLabels(carriers)), "merge_parameters");
+        }
+
+        const DocumentBlock& carrier = *carriers.front();
+        Value::Map*          holder  = carrier.entry;
+        if (carrier.isSubgraph) {
+            const auto schedulerIt = carrier.entry->find("scheduler");
+            holder                 = schedulerIt == carrier.entry->end() ? nullptr : schedulerIt->second.get_if<Value::Map>();
+            if (holder == nullptr) {
+                raiseError(std::format("'{}' is a subgraph without a scheduler, which takes no settings", blockName), "merge_parameters");
+            }
+        }
+        Value& parametersValue = (*holder)["parameters"];
+        if (!parametersValue.is_map()) {
+            parametersValue = Value::Map{};
+        }
+        Value::Map& entryParameters = *parametersValue.get_if<Value::Map>();
+        PyObject*   blockTypes      = types.is_none() ? nullptr : PyDict_GetItemWithError(types.ptr(), blockKey.ptr());
+        throwIfPythonError();
+        for (const auto& [key, item] : py::reinterpret_borrow<py::dict>(parameters)) {
+            const std::string name = stringFrom(key, Subject{});
+            const Subject     subject{.key = name};
+            const auto        held     = entryParameters.find(name);
+            PyObject*         typeCode = blockTypes == nullptr || !PyDict_Check(blockTypes) ? nullptr : PyDict_GetItemWithError(blockTypes, key.ptr());
+            throwIfPythonError();
+            Value value;
+            if (held != entryParameters.end() && !held->second.is_monostate()) {
+                value = valueAs(item, parseTypeCode(typeCodeOf(held->second)), subject);
+            } else if (typeCode != nullptr) {
+                value = valueAs(item, parseTypeCode(stringFrom(typeCode, subject)), subject);
+            } else {
+                value = valueFrom(item, subject);
+            }
+            entryParameters.insert_or_assign(std::pmr::string(name), std::move(value));
+        }
+    }
+    return withoutGil([&parsed] { return gr::pmt::yaml::serialize<gr::pmt::yaml::TypeTagMode::Auto>(*parsed, kDocumentKeyOrder); });
+}
+
 } // namespace
 
 PYBIND11_MODULE(_gr4, module) {
@@ -1611,5 +1746,14 @@ PYBIND11_MODULE(_gr4, module) {
             return withoutGil([] { return gr::RuntimeGraph::availableSchedulerTypes(); });
         },
         "Returns the registry key of every scheduler type this process can build.");
+    module.def("merge_parameters", &mergeParameters, py::arg("document"), py::arg("settings"), py::arg("types") = py::none(),
+        "Sets settings (block name to key to value) in the block entries of a graph document and returns the document "
+        "written again with its type tags.\n\n"
+        "A block entry at any depth of subgraphs is named by its parameters.name or its unique_name, and a subgraph "
+        "without parameters.name by its top-level name. The settings of a subgraph with a scheduler go to its "
+        "scheduler.parameters; a subgraph without a scheduler takes no settings and raises Error. A parameter held "
+        "there takes the type of the value it holds; one not held takes the type code types gives it (block name to "
+        "key to code), or the type its Python value selects. A name no entry carries, or one two entries carry, raises "
+        "Error; so does a document that does not parse, naming the line and column.");
     module.def("plugin_directories", &pluginDirectories, "Returns the directories the plugin loader reads, from GNURADIO4_PLUGIN_DIRECTORIES as it was at the loader's first use.");
 }
