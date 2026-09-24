@@ -239,7 +239,8 @@ class RuntimeGraph:
     ) -> BlockHandle:
         """Instantiates the block type registered as type, names it and adds it.
 
-        The parameters are in force when the block starts; types maps a key to its type code.
+        The parameters are in force when the block starts; types maps a key to its type code. A parameter the block does
+        not declare or refuses raises Error with the block's message.
         """
 
     def emplace_subgraph(self, name: str, parameters: dict[str, object] | None = None) -> BlockHandle:

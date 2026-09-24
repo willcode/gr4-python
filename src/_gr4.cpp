@@ -1048,7 +1048,7 @@ void defineRuntimeGraph(py::module_& module) {
                 gr::RuntimeGraph& graph             = self.get();
                 return valueOrRaise(withoutGil([&] { return graph.emplace(type, name, std::move(initialParameters)); }));
             },
-            py::arg("type"), py::arg("name"), py::arg("parameters") = py::none(), py::arg("types") = py::none(), "Instantiates the block type registered as type, names it and adds it. The parameters are in force when the block starts; types maps a key to its type code.")
+            py::arg("type"), py::arg("name"), py::arg("parameters") = py::none(), py::arg("types") = py::none(), "Instantiates the block type registered as type, names it and adds it. The parameters are in force when the block starts; types maps a key to its type code. A parameter the block does not declare or refuses raises Error with the block's message.")
         .def(
             "emplace_subgraph",
             [](GraphObject& self, const std::string& name, const py::object& parameters) {
