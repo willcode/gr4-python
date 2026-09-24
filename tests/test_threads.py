@@ -152,6 +152,11 @@ class RunInThread(unittest.TestCase):
             "    print('started')\n"
             "except _gr4.Error as error:\n"
             "    print('refused', error.where, error.message)\n"
+            "try:\n"
+            "    runtime.result()\n"
+            "    print('result None')\n"
+            "except _gr4.Error as error:\n"
+            "    print('result', error.message)\n"
             "resource.setrlimit(resource.RLIMIT_NPROC, (soft, hard))\n"
             "runtime.run_in_thread()\n"
             "print('next run ended', runtime.wait(30.0))\n"
@@ -161,8 +166,10 @@ class RunInThread(unittest.TestCase):
         )
         run = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True, timeout=60)
         self.assertEqual(run.returncode, 0, run.stderr)
-        refused, ended = run.stdout.splitlines()
+        refused, result, ended = run.stdout.splitlines()
         self.assertTrue(refused.startswith("refused Runtime.run_in_thread the run's thread did not start"), refused)
+        # The refused start's error is the last run's result until the next run ends.
+        self.assertEqual(result.removeprefix("result "), refused.removeprefix("refused Runtime.run_in_thread "))
         self.assertEqual(ended, "next run ended True")
 
 
@@ -180,6 +187,28 @@ class OneLifecycle(unittest.TestCase):
         runtime.stop()
         finish(self, runner)
         self.assertEqual(runtime.state, _gr4.State.STOPPED)
+
+    def test_a_stop_right_after_a_start_ends_the_run_on_a_fresh_and_on_a_stopped_scheduler(self):
+        runtime = _gr4.Runtime.create(endless_graph())
+        self.addCleanup(runtime.close)
+        # The first start meets IDLE, and every later one the STOPPED the run before it left.
+        for repetition in range(REPETITIONS):
+            with self.subTest(repetition=repetition):
+                runtime.start()
+                runtime.stop()
+                self.assertTrue(runtime.wait(0.0))
+                self.assertEqual(runtime.state, _gr4.State.STOPPED)
+                self.assertIsNone(runtime.result())
+
+    def test_a_running_runtime_released_without_close_stops_its_run_and_returns(self):
+        runtime = _gr4.Runtime.create(endless_graph())
+        runtime.run_in_thread()
+        self.assertEqual(until_running(runtime), _gr4.State.RUNNING)
+        # The worker drops the last reference: the destructor stops the endless run and waits for its end.
+        held = [runtime]
+        del runtime
+        finish(self, Worker(held.clear))
+        self.assertEqual(held, [])
 
     def test_two_threads_closing_one_runtime_both_return(self):
         for repetition in range(REPETITIONS):
