@@ -5,6 +5,7 @@ registry keys and configured through their reflected settings, so every register
 its own. The extension module ``gr4._gr4`` binds the core library's type-erased runtime.
 """
 
+from . import registry
 from .errors import (
     Error,
     GraphBusyError,
@@ -16,17 +17,24 @@ from .errors import (
     Timeout,
     UnknownBlockType,
 )
+from .registry import DEFAULT_SCHEDULER, BlockType, Port, Setting, configure
 from .values import Settings
 
 __all__ = [
+    "DEFAULT_SCHEDULER",
+    "BlockType",
     "Error",
     "GraphBusyError",
     "GraphFileError",
+    "Port",
     "PortError",
     "RunError",
     "SchedulerError",
+    "Setting",
     "SettingError",
     "Settings",
     "Timeout",
     "UnknownBlockType",
+    "configure",
+    "registry",
 ]
