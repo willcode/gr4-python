@@ -1006,7 +1006,7 @@ void defineBlockHandle(py::module_& module) {
             },
             "Returns the type code of every active setting, by key.")
         .def(
-            "set_staged", [](gr::BlockHandle& block, const py::object& parameters, const py::object& types) { return mapToPython(block.setStaged(propertyMapFrom(parameters, types))); }, py::arg("parameters"), py::arg("types") = py::none(), "Stages settings for the block's next work call; types maps a key to its type code. Returns the settings that could not be staged.")
+            "set_staged", [](gr::BlockHandle& block, const py::object& parameters, const py::object& types) { return mapToPython(valueOrRaise(block.setStaged(propertyMapFrom(parameters, types)))); }, py::arg("parameters"), py::arg("types") = py::none(), "Stages settings for the block's next work call; types maps a key to its type code. Returns the settings the block does not declare. A value that does not fit its type code raises TypeError or OverflowError; a value the block cannot convert or refuses raises Error. Either way nothing is staged.")
         .def(
             "meta_information", [](const gr::BlockHandle& block) { return mapToPython(block.metaInformation()); }, "Returns the block's meta-information.")
         .def(

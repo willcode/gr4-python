@@ -109,7 +109,8 @@ class BlockHandle:
     def set_staged(self, parameters: dict[str, object], types: dict[str, str] | None = None) -> _Settings:
         """Stages settings for the block's next work call; types maps a key to its type code.
 
-        Returns the settings that could not be staged.
+        Returns the settings the block does not declare. A value that does not fit its type code raises TypeError or
+        OverflowError; a value the block cannot convert or refuses raises Error. Either way nothing is staged.
         """
 
     def meta_information(self) -> _Settings:
