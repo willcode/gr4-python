@@ -107,6 +107,20 @@ class ConstructionSettings(TemporaryFiles):
         with self.assertRaises(gr4.SettingError):
             graph.add(SIGNAL_GENERATOR, "unconverted", strict=False, sample_rate=20_000_000)
 
+    def test_a_setting_the_block_refuses_without_strict_raises_setting_error_with_the_block_s_message(self):
+        refusals = {
+            "undeclared key": ({"sample_rat": 2.0}, ["settings could not be applied", '"sample_rat"']),
+            "value of another type": ({"sample_rate": 20_000_000}, ["'sample_rate'", "float32"]),
+        }
+        for refusal, (settings, phrases) in refusals.items():
+            with self.subTest(refusal=refusal):
+                graph = gr4.Graph()
+                with self.assertRaises(gr4.SettingError) as caught:
+                    graph.add(SIGNAL_GENERATOR, "refused", strict=False, **settings)
+                for phrase in phrases:
+                    self.assertIn(phrase, caught.exception.message)
+                self.assertEqual(caught.exception.where, "RuntimeGraph::emplace")
+
     def test_a_misspelled_keyword_is_refused_with_a_suggestion_and_adds_nothing(self):
         graph = gr4.Graph()
         with self.assertRaises(KeyError) as caught:

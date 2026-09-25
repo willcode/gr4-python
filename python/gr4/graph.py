@@ -252,8 +252,9 @@ class Graph:
         The settings are construction parameters, in force when the block starts. A scheduler key adds a nested
         scheduler. With strict, each setting is checked against the type's description: a key the type does not
         declare raises KeyError naming the closest declared keys, and each value is converted to its setting's type,
-        raising TypeError or OverflowError when it does not fit. strict=False passes the settings as they are. meta is
-        merged into the block's meta-information.
+        raising TypeError or OverflowError when it does not fit. strict=False passes the settings as they are. A
+        setting the block refuses raises SettingError with the block's message. meta is merged into the block's
+        meta-information.
         """
         self._check_idle("add")
         key = type.key if isinstance(type, BlockType) else type

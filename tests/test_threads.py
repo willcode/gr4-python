@@ -1,4 +1,4 @@
-"""Tests of runs on the extension's thread, of stops and closes from other Python threads, of Ctrl-C, and of the GIL
+"""Tests of runs on the runtime's thread, of stops and closes from other Python threads, of Ctrl-C, and of the GIL
 during a run."""
 
 import os
@@ -13,6 +13,10 @@ from gr4 import _gr4
 
 NULL_SOURCE = "gr::blocks::testing::NullSource<float32>"
 NULL_SINK = "gr::blocks::testing::NullSink<float32>"
+CLOCK_SOURCE = "gr::blocks::basic::ClockSource"
+BYTE_SINK = "gr::blocks::testing::NullSink<uint8>"
+# The clock source's timer thread takes the name "sync:" and the block's name once its task begins.
+CLOCK_NAME = "slowclock"
 COUNT = 100_000
 REPETITIONS = 20
 # The longest a stop or a close may take to end a run before a case fails.
@@ -26,6 +30,44 @@ def endless_graph():
     sink = graph.emplace(NULL_SINK, "sink")
     graph.connect(source, "out", sink, "in")
     return graph
+
+
+def slow_stop_graph():
+    """Returns a graph whose stop waits up to three seconds once the clock source's timer thread runs: the source wakes
+    every three seconds, and its stop() returns once its timer wakes."""
+    graph = _gr4.RuntimeGraph()
+    source = graph.emplace(
+        CLOCK_SOURCE,
+        CLOCK_NAME,
+        {"sample_rate": 1.0, "chunk_size": 3},
+        {"sample_rate": "float32", "chunk_size": "uint32"},
+    )
+    sink = graph.emplace(BYTE_SINK, "sink")
+    graph.connect(source, "out", sink, "in")
+    return graph
+
+
+def until_timer_runs(runtime):
+    """Waits until the scheduler reports RUNNING and the clock source's timer thread has begun, at most JOIN_TIMEOUT
+    seconds, and returns whether both hold."""
+    deadline = time.monotonic() + JOIN_TIMEOUT
+    while time.monotonic() < deadline:
+        if runtime.state == _gr4.State.RUNNING and f"sync:{CLOCK_NAME}" in thread_names():
+            return True
+        time.sleep(0.001)
+    return False
+
+
+def thread_names():
+    """Returns the names of this process's threads."""
+    names = []
+    for thread in os.listdir("/proc/self/task"):
+        try:
+            with open(f"/proc/self/task/{thread}/comm") as comm:
+                names.append(comm.read().strip())
+        except OSError:
+            pass
+    return names
 
 
 def until_running(runtime):
@@ -62,7 +104,7 @@ def finish(test, *workers):
 
 
 class RunInThread(unittest.TestCase):
-    """run_in_thread() runs on a thread the extension owns, and wait() blocks without the GIL."""
+    """run_in_thread() runs on a thread the runtime owns, and wait() blocks without the GIL."""
 
     def setUp(self):
         self.runtime = _gr4.Runtime.create(endless_graph())
@@ -152,6 +194,11 @@ class RunInThread(unittest.TestCase):
             "    print('started')\n"
             "except _gr4.Error as error:\n"
             "    print('refused', error.where, error.message)\n"
+            "try:\n"
+            "    runtime.result()\n"
+            "    print('result None')\n"
+            "except _gr4.Error as error:\n"
+            "    print('result', error.message)\n"
             "resource.setrlimit(resource.RLIMIT_NPROC, (soft, hard))\n"
             "runtime.run_in_thread()\n"
             "print('next run ended', runtime.wait(30.0))\n"
@@ -161,10 +208,10 @@ class RunInThread(unittest.TestCase):
         )
         run = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True, timeout=60)
         self.assertEqual(run.returncode, 0, run.stderr)
-        refused, ended = run.stdout.splitlines()
-        self.assertTrue(
-            refused.startswith("refused Runtime.run_in_thread the extension's thread did not start"), refused
-        )
+        refused, result, ended = run.stdout.splitlines()
+        self.assertTrue(refused.startswith("refused Runtime.run_in_thread the run's thread did not start"), refused)
+        # The refused start's error is the last run's result until the next run ends.
+        self.assertEqual(result.removeprefix("result "), refused.removeprefix("refused Runtime.run_in_thread "))
         self.assertEqual(ended, "next run ended True")
 
 
@@ -182,6 +229,28 @@ class OneLifecycle(unittest.TestCase):
         runtime.stop()
         finish(self, runner)
         self.assertEqual(runtime.state, _gr4.State.STOPPED)
+
+    def test_a_stop_right_after_a_start_ends_the_run_on_a_fresh_and_on_a_stopped_scheduler(self):
+        runtime = _gr4.Runtime.create(endless_graph())
+        self.addCleanup(runtime.close)
+        # The first start meets IDLE, and every later one the STOPPED the run before it left.
+        for repetition in range(REPETITIONS):
+            with self.subTest(repetition=repetition):
+                runtime.start()
+                runtime.stop()
+                self.assertTrue(runtime.wait(0.0))
+                self.assertEqual(runtime.state, _gr4.State.STOPPED)
+                self.assertIsNone(runtime.result())
+
+    def test_a_running_runtime_released_without_close_stops_its_run_and_returns(self):
+        runtime = _gr4.Runtime.create(endless_graph())
+        runtime.run_in_thread()
+        self.assertEqual(until_running(runtime), _gr4.State.RUNNING)
+        # The worker drops the last reference: the destructor stops the endless run and waits for its end.
+        held = [runtime]
+        del runtime
+        finish(self, Worker(held.clear))
+        self.assertEqual(held, [])
 
     def test_two_threads_closing_one_runtime_both_return(self):
         for repetition in range(REPETITIONS):
@@ -277,6 +346,42 @@ class Interrupts(unittest.TestCase):
         self.assertEqual(self.runtime.state, _gr4.State.RUNNING)
         self.runtime.stop()
         self.assertTrue(self.runtime.wait(0.0))
+
+
+class InterruptedStops(unittest.TestCase):
+    """SIGINT raises KeyboardInterrupt from a stop that waits for a block's slow stop(), and the run still ends."""
+
+    def setUp(self):
+        previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+        self.addCleanup(signal.signal, signal.SIGINT, previous)
+        self.runtime = _gr4.Runtime.create(slow_stop_graph())
+        self.addCleanup(self.runtime.close)
+
+    def test_ctrl_c_raises_keyboard_interrupt_from_a_waiting_stop_and_close_waits_for_the_end(self):
+        self.runtime.run_in_thread()
+        # A stop before the timer's task begins ends that task before its first sleep, and returns at once.
+        self.assertTrue(until_timer_runs(self.runtime))
+        stopping = threading.Event()
+
+        # The stop has left RUNNING once its request reached the scheduler, and it then waits for the clock's stop().
+        def interrupt_once_stopping():
+            stopping.wait()
+            deadline = time.monotonic() + JOIN_TIMEOUT
+            while self.runtime.state == _gr4.State.RUNNING and time.monotonic() < deadline:
+                time.sleep(0.001)
+            os.kill(os.getpid(), signal.SIGINT)
+
+        sender = Worker(interrupt_once_stopping)
+        with self.assertRaises(KeyboardInterrupt):
+            stopping.set()
+            self.runtime.stop()
+        finish(self, sender)
+        # A stop that returned only at the run's end would leave nothing in progress here.
+        self.assertFalse(self.runtime.wait(0.0))
+        self.assertNotEqual(self.runtime.state, _gr4.State.RUNNING)
+        self.runtime.close()
+        # close() kept the result it read once the run had ended; read during the run, it would be an Error.
+        self.assertIsNone(self.runtime.result())
 
 
 if __name__ == "__main__":

@@ -14,6 +14,9 @@ FILE_SOURCE = "gr::blocks::fileio::BasicFileSource<float32>"
 NULL_SINK = "gr::blocks::testing::NullSink<float32>"
 COPY = "gr::blocks::testing::Copy<float32>"
 FLOAT32_BYTES = 4
+SAMPLES = 1000
+# The longest a run of SAMPLES may take before a case fails.
+RUN_TIMEOUT = 30.0
 
 
 def counted_chain(path, samples):
@@ -87,6 +90,44 @@ class RunToCompletion(unittest.TestCase):
         self.assertEqual(os.path.getsize(path), 10 * FLOAT32_BYTES)
 
 
+class Stops(unittest.TestCase):
+    """stop() without a run in progress touches nothing: before the first run and after a run ended by itself."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.directory = directory.name
+
+    def test_a_stop_before_any_run_leaves_idle_and_the_next_run_writes_all_n_samples(self):
+        for begin in (_gr4.Runtime.run_and_wait, _gr4.Runtime.start):
+            with self.subTest(begin=begin.__name__):
+                path = os.path.join(self.directory, f"{begin.__name__}.f32")
+                runtime = _gr4.Runtime.create(counted_chain(path, SAMPLES))
+                self.addCleanup(runtime.close)
+                runtime.stop()
+                self.assertEqual(runtime.state, _gr4.State.IDLE)
+                begin(runtime)
+                self.assertTrue(runtime.wait(RUN_TIMEOUT))
+                self.assertIsNone(runtime.result())
+                self.assertEqual(runtime.state, _gr4.State.STOPPED)
+                self.assertEqual(os.path.getsize(path), SAMPLES * FLOAT32_BYTES)
+
+    def test_a_stop_after_a_run_ended_by_itself_leaves_the_state_and_the_result(self):
+        path = os.path.join(self.directory, "ended.f32")
+        runtime = _gr4.Runtime.create(counted_chain(path, SAMPLES))
+        self.addCleanup(runtime.close)
+        runtime.run_in_thread()
+        self.assertTrue(runtime.wait(RUN_TIMEOUT))
+        for stop in range(2):
+            with self.subTest(stop=stop):
+                runtime.stop()
+                self.assertEqual(runtime.state, _gr4.State.STOPPED)
+                self.assertIsNone(runtime.result())
+        self.assertEqual(os.path.getsize(path), SAMPLES * FLOAT32_BYTES)
+        runtime.close()
+        self.assertIsNone(runtime.result())
+
+
 class FailedRun(unittest.TestCase):
     """A run that fails raises its Error from result() and from run_and_wait()."""
 
@@ -112,6 +153,10 @@ class FailedRun(unittest.TestCase):
             runtime.run_and_wait()
         self.assertEqual(again.exception.message, caught.exception.message)
         self.assertFalse(os.path.exists(missing))
+        runtime.close()
+        with self.assertRaises(_gr4.Error) as closed:
+            runtime.result()
+        self.assertEqual(closed.exception.message, caught.exception.message)
 
 
 class Defaults(unittest.TestCase):

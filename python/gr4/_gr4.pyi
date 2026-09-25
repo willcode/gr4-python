@@ -239,7 +239,8 @@ class RuntimeGraph:
     ) -> BlockHandle:
         """Instantiates the block type registered as type, names it and adds it.
 
-        The parameters are in force when the block starts; types maps a key to its type code.
+        The parameters are in force when the block starts; types maps a key to its type code. A parameter the block does
+        not declare or refuses raises Error with the block's message.
         """
 
     def emplace_subgraph(self, name: str, parameters: dict[str, object] | None = None) -> BlockHandle:
@@ -369,13 +370,15 @@ class Quiescence:
 class Runtime:
     """A scheduler holding a graph, and the subscriber on its message plane.
 
-    The graph runs on a thread the extension owns, one run at a time: run_and_wait(), start() and run_in_thread()
-    start a run, and each raises Error while a run is in progress. close() stops the run, joins the thread and releases
-    the runtime; the destructor does the same.
+    The runtime runs the graph on a thread it owns, one run at a time, and keeps the last run's result:
+    run_and_wait(), start() and run_in_thread() start a run, and each raises Error while a run is in progress. close()
+    stops the run, waits for its end and releases the runtime; the destructor does the same.
 
     create(), run_and_wait(), start(), run_in_thread(), stop(), wait(), request_state(), close() and entering and
-    leaving a quiesce() block release the GIL, and so does the deallocation of a runtime. A call that waits in the main
-    thread runs the signal handlers every 100 ms, and Ctrl-C raises KeyboardInterrupt from it.
+    leaving a quiesce() block release the GIL, and so does the deallocation of a runtime. run_and_wait(), wait(), stop()
+    and close() run the signal handlers every 100 ms while they wait in the main thread, and Ctrl-C raises
+    KeyboardInterrupt from them. A KeyboardInterrupt from stop() or close() leaves the stop requested and the run
+    ending, and close() after it waits for the end.
     """
 
     @staticmethod
@@ -390,35 +393,41 @@ class Runtime:
         """
 
     def run_and_wait(self) -> None:
-        """Runs the graph to its end on the extension's thread and waits for it.
+        """Runs the graph to its end on the runtime's thread and waits for it.
 
-        Ctrl-C stops the run, joins the thread and raises KeyboardInterrupt; a run that fails raises its Error.
+        Ctrl-C stops the run, waits for its end and raises KeyboardInterrupt, and a second Ctrl-C ends that wait and
+        leaves the run ending; a run that fails raises its Error.
         """
 
     def start(self) -> None:
-        """Runs the graph on the extension's thread, as run_in_thread() does, and returns.
+        """Runs the graph on the runtime's thread, as run_in_thread() does, and returns.
 
         stop() ends the run; wait() and result() report it.
         """
 
     def stop(self) -> None:
-        """Stops the run on the extension's thread and waits for it to end.
+        """Stops the run in progress and waits for it to end.
 
-        Without a run in progress it does nothing.
+        Without a run in progress it does nothing. Ctrl-C raises KeyboardInterrupt and leaves the stop requested and the
+        run ending.
         """
 
     def run_in_thread(self) -> None:
-        """Runs the graph on the extension's thread and returns; wait() and result() report the run."""
+        """Runs the graph on the runtime's thread and returns; wait() and result() report the run."""
 
     def wait(self, timeout: float | None = None) -> bool:
-        """Waits for the last run on the extension's thread to end.
+        """Waits for the last run to end.
 
         Returns True when it has ended, False when timeout seconds passed first. A NaN timeout raises ValueError;
         Ctrl-C raises KeyboardInterrupt and leaves the run going.
         """
 
     def result(self) -> None:
-        """Returns None when the last run on the extension's thread ended normally, and raises its Error otherwise."""
+        """Returns None when the last run ended normally, and raises its Error otherwise.
+
+        While a run is in progress it raises Error, and after a start whose thread did not start it raises that start's
+        Error. After close() it reports the last run before the close.
+        """
 
     @property
     def state(self) -> State:
@@ -456,9 +465,10 @@ class Runtime:
         """Returns the scheduler as a block, for its own settings."""
 
     def close(self) -> None:
-        """Stops the run on the extension's thread, joins the thread and releases the runtime.
+        """Stops the run in progress, waits for its end and releases the runtime.
 
-        A call on a closed runtime does nothing.
+        A call on a closed runtime does nothing. Ctrl-C raises KeyboardInterrupt, leaves the stop requested and the run
+        ending, and keeps the runtime, which a later close() releases.
         """
 
 def available_block_types() -> list[str]:
