@@ -153,7 +153,8 @@ applies it, so the bindings stage.
 - `run()` and `start()` share one mechanism: `Runtime::start()` runs `runAndWait()` on a thread the runtime owns
   and keeps its result, which `wait()` returns or raises as `RunError`.
 - `run()` waits in slices with the GIL released; on `KeyboardInterrupt` it stops the graph, waits for the run's
-  end and raises again. `stop()` waits inside `Runtime::stop()` until the run has ended.
+  end and raises again. `stop()` waits for the run's end in the same slices through `Runtime::stopFor()`, and a
+  `KeyboardInterrupt` there leaves the stop requested and the run ending.
 - Events are drained by every call that waits (`run`, `wait`, `events`, `request`) and by the dispatch thread
   while one exists.
 - An `atexit` hook stops and joins every live scheduler before the interpreter and the plugin loader are torn

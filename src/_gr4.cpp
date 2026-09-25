@@ -1,8 +1,9 @@
 /**
  * @brief The extension module gr4._gr4: the type-erased runtime of gnuradio4-core for Python.
  *
- * The module binds `gnuradio-4.0/Runtime.hpp` one class to one class. Blocks and schedulers are named by their
- * registry keys, and settings travel as `pmt::Value` maps converted to and from Python objects.
+ * The module binds each class of `gnuradio-4.0/Runtime.hpp` as one Python class and merges settings into a graph
+ * document. Blocks and schedulers are named by their registry keys, and settings travel as `pmt::Value` maps
+ * converted to and from Python objects.
  */
 
 #include <gnuradio-4.0/Message.hpp>
@@ -1153,7 +1154,19 @@ bool waitForRun(const gr::Runtime& held, std::optional<Clock::time_point> deadli
     }
 }
 
-/// A Python `Runtime`: a scheduler holding a graph, and the last run's result once close() released the runtime.
+/// Stops the run of `held` in progress and returns once it has ended. The GIL is released while the call waits in
+/// `Runtime::stopFor()` and taken every kSignalCheckInterval to run the signal handlers. An exception a handler
+/// raises, the KeyboardInterrupt of Ctrl-C among them, ends the wait and leaves the stop requested and the run
+/// ending. Called with the GIL held.
+void stopRun(gr::Runtime& held) {
+    while (!withoutGil([&held] { return held.stopFor(kSignalCheckInterval); })) {
+        if (PyErr_CheckSignals() != 0) {
+            throw py::error_already_set();
+        }
+    }
+}
+
+/// A Python `Runtime`:a scheduler holding a graph, and the last run's result once close() released the runtime.
 ///
 /// `mutex` guards every member. A call that uses the runtime holds its own reference to it, so `close()` on another
 /// thread destroys the runtime only after that call returns. The runtime's destructor stops the run in progress and
@@ -1288,10 +1301,10 @@ void defineRuntime(py::module_& module) {
         "run_and_wait(), start() and run_in_thread() start a run, and each raises Error while a run is in progress. "
         "close() stops the run, waits for its end and releases the runtime; the destructor does the same.\n\n"
         "create(), run_and_wait(), start(), run_in_thread(), stop(), wait(), request_state(), close() and entering and "
-        "leaving a quiesce() block release the GIL, and so does the deallocation of a runtime. run_and_wait() and "
-        "wait() run the signal handlers every 100 ms while they wait in the main thread, and Ctrl-C raises "
-        "KeyboardInterrupt from them. stop() and close() wait inside the runtime until the run has ended, and the "
-        "signal handlers run after they return.")
+        "leaving a quiesce() block release the GIL, and so does the deallocation of a runtime. run_and_wait(), "
+        "wait(), stop() and close() run the signal handlers every 100 ms while they wait in the main thread, and "
+        "Ctrl-C raises KeyboardInterrupt from them. A KeyboardInterrupt from stop() or close() leaves the stop "
+        "requested and the run ending, and close() after it waits for the end.")
         .def_static(
             "create",
             [](GraphObject& graph, const std::optional<std::string>& type, const py::object& settings, const py::object& types) {
@@ -1324,13 +1337,14 @@ void defineRuntime(py::module_& module) {
                 try {
                     waitForRun(*held, std::nullopt);
                 } catch (const py::error_already_set&) {
-                    withoutGil([&held] { held->stop(); });
+                    stopRun(*held);
                     throw;
                 }
                 raiseIfFailed(held->result());
             },
             "Runs the graph to its end on the runtime's thread and waits for it. Ctrl-C stops the run, waits for its end "
-            "and raises KeyboardInterrupt; a run that fails raises its Error.")
+            "and raises KeyboardInterrupt, and a second Ctrl-C ends that wait and leaves the run ending; a run that "
+            "fails raises its Error.")
         .def(
             "start", [](RuntimeObject& self) { std::ignore = self.start("Runtime.start"); },
             "Runs the graph on the runtime's thread, as run_in_thread() does, and returns. stop() ends the run; wait() "
@@ -1339,9 +1353,10 @@ void defineRuntime(py::module_& module) {
             "stop",
             [](RuntimeObject& self) {
                 const std::shared_ptr<gr::Runtime> held = self.acquire();
-                withoutGil([&held] { held->stop(); });
+                stopRun(*held);
             },
-            "Stops the run in progress and waits for it to end. Without a run in progress it does nothing.")
+            "Stops the run in progress and waits for it to end. Without a run in progress it does nothing. Ctrl-C "
+            "raises KeyboardInterrupt and leaves the stop requested and the run ending.")
         .def(
             "run_in_thread", [](RuntimeObject& self) { std::ignore = self.start("Runtime.run_in_thread"); }, "Runs the graph on the runtime's thread and returns; wait() and result() report the run.")
         .def(
@@ -1414,8 +1429,8 @@ void defineRuntime(py::module_& module) {
                 if (held == nullptr) {
                     return;
                 }
+                stopRun(*held);
                 withoutGil([&self, &held] {
-                    held->stop();
                     {
                         std::lock_guard lock(self.mutex);
                         if (self.runtime != nullptr) {
@@ -1427,7 +1442,8 @@ void defineRuntime(py::module_& module) {
                 });
             },
             "Stops the run in progress, waits for its end and releases the runtime. A call on a closed runtime does "
-            "nothing.");
+            "nothing. Ctrl-C raises KeyboardInterrupt, leaves the stop requested and the run ending, and keeps the "
+            "runtime, which a later close() releases.");
 }
 
 /// The key order of the graph writer; a merged document lists its keys in the order `to_yaml()` uses.

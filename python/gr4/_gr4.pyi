@@ -375,9 +375,10 @@ class Runtime:
     stops the run, waits for its end and releases the runtime; the destructor does the same.
 
     create(), run_and_wait(), start(), run_in_thread(), stop(), wait(), request_state(), close() and entering and
-    leaving a quiesce() block release the GIL, and so does the deallocation of a runtime. run_and_wait() and wait() run
-    the signal handlers every 100 ms while they wait in the main thread, and Ctrl-C raises KeyboardInterrupt from them.
-    stop() and close() wait inside the runtime until the run has ended, and the signal handlers run after they return.
+    leaving a quiesce() block release the GIL, and so does the deallocation of a runtime. run_and_wait(), wait(), stop()
+    and close() run the signal handlers every 100 ms while they wait in the main thread, and Ctrl-C raises
+    KeyboardInterrupt from them. A KeyboardInterrupt from stop() or close() leaves the stop requested and the run
+    ending, and close() after it waits for the end.
     """
 
     @staticmethod
@@ -394,7 +395,8 @@ class Runtime:
     def run_and_wait(self) -> None:
         """Runs the graph to its end on the runtime's thread and waits for it.
 
-        Ctrl-C stops the run, waits for its end and raises KeyboardInterrupt; a run that fails raises its Error.
+        Ctrl-C stops the run, waits for its end and raises KeyboardInterrupt, and a second Ctrl-C ends that wait and
+        leaves the run ending; a run that fails raises its Error.
         """
 
     def start(self) -> None:
@@ -406,7 +408,8 @@ class Runtime:
     def stop(self) -> None:
         """Stops the run in progress and waits for it to end.
 
-        Without a run in progress it does nothing.
+        Without a run in progress it does nothing. Ctrl-C raises KeyboardInterrupt and leaves the stop requested and the
+        run ending.
         """
 
     def run_in_thread(self) -> None:
@@ -464,7 +467,8 @@ class Runtime:
     def close(self) -> None:
         """Stops the run in progress, waits for its end and releases the runtime.
 
-        A call on a closed runtime does nothing.
+        A call on a closed runtime does nothing. Ctrl-C raises KeyboardInterrupt, leaves the stop requested and the run
+        ending, and keeps the runtime, which a later close() releases.
         """
 
 def available_block_types() -> list[str]:
