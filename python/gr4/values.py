@@ -118,4 +118,4 @@ class Settings(Mapping[str, object]):
 
     def __repr__(self) -> str:
         """Names the block and lists the values in force."""
-        return f"<Settings of {self._owner}: {self._handle.active_parameters()!r}>"
+        return f"<Settings of {self._owner}: {self._handle.get()!r}>"

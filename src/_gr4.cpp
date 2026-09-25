@@ -992,16 +992,14 @@ void defineBlockHandle(py::module_& module) {
             },
             py::arg("key"), "Returns the active value of one setting. KeyError when the block has no setting of that name.")
         .def(
-            "active_parameters", [](const gr::BlockHandle& block) { return mapToPython(block.activeParameters()); }, "Returns the settings in force.")
-        .def(
             "staged_parameters", [](const gr::BlockHandle& block) { return mapToPython(block.stagedParameters()); }, "Returns the settings staged for the block's next work call.")
         .def(
-            "default_parameters", [](const gr::BlockHandle& block) { return mapToPython(block.defaultParameters()); }, "Returns the settings reset_defaults() restores.")
+            "default_parameters", [](const gr::BlockHandle& block) { return mapToPython(block.defaultParameters()); }, "Returns the block's default settings.")
         .def(
             "setting_types",
             [](const gr::BlockHandle& block) {
                 py::dict types;
-                for (const auto& [key, value] : block.activeParameters()) {
+                for (const auto& [key, value] : block.get()) {
                     types[stringToPython(key)] = typeCodeOf(value);
                 }
                 return types;
@@ -1010,13 +1008,9 @@ void defineBlockHandle(py::module_& module) {
         .def(
             "set_staged", [](gr::BlockHandle& block, const py::object& parameters, const py::object& types) { return mapToPython(block.setStaged(propertyMapFrom(parameters, types))); }, py::arg("parameters"), py::arg("types") = py::none(), "Stages settings for the block's next work call; types maps a key to its type code. Returns the settings that could not be staged.")
         .def(
-            "set", [](gr::BlockHandle& block, const py::object& parameters, const py::object& types) { return mapToPython(block.set(propertyMapFrom(parameters, types))); }, py::arg("parameters"), py::arg("types") = py::none(), "Stores settings without staging them; types maps a key to its type code. Returns the settings that could not be stored.")
-        .def(
             "meta_information", [](const gr::BlockHandle& block) { return mapToPython(block.metaInformation()); }, "Returns the block's meta-information.")
         .def(
             "set_meta_information", [](gr::BlockHandle& block, const py::object& information) { block.setMetaInformation(propertyMapFrom(information, py::none())); }, py::arg("information"), "Replaces the block's meta-information.")
-        .def("store_defaults", &gr::BlockHandle::storeDefaults, "Makes the active settings the defaults.")
-        .def("reset_defaults", &gr::BlockHandle::resetDefaults, "Restores the default settings.")
         .def(
             "__eq__", [](const gr::BlockHandle& self, const gr::BlockHandle& other) { return self.uniqueName() == other.uniqueName(); }, py::is_operator())
         .def("__hash__", [](const gr::BlockHandle& block) { return py::hash(py::str(std::string(block.uniqueName()))); })
@@ -1024,7 +1018,7 @@ void defineBlockHandle(py::module_& module) {
 }
 
 void definePortAndEdge(py::module_& module) {
-    py::class_<gr::RuntimePort>(module, "RuntimePort", "One port of a block, as RuntimeGraph.input_ports() and output_ports() describe it.").def_readonly("name", &gr::RuntimePort::name, "The name connect() accepts: 'out', or 'in#1' for element 1 of a collection.").def_readonly("type_name", &gr::RuntimePort::typeName, "The value type, as port_type_name() spells it.").def_readonly("is_input", &gr::RuntimePort::isInput, "True for an input port.").def_readonly("is_message", &gr::RuntimePort::isMessage, "True for a message port, False for a stream port.").def_readonly("is_optional", &gr::RuntimePort::isOptional, "True when the port may stay unconnected.").def_readonly("is_synchronous", &gr::RuntimePort::isSynchronous, "True when the port moves samples in step with the block's other synchronous ports.").def_readonly("is_connected", &gr::RuntimePort::isConnected, "True while a running scheduler holds the port's edge connected.").def_readonly("domain", &gr::RuntimePort::domain, "The compute domain of the port.").def_readonly("collection", &gr::RuntimePort::collection, "The name of the collection the port belongs to, or ''.").def_readonly("index", &gr::RuntimePort::index, "The port's position in its collection, or 0.").def_readonly("min_samples", &gr::RuntimePort::minSamples, "The fewest samples the port takes per work call.").def_readonly("max_samples", &gr::RuntimePort::maxSamples, "The most samples the port takes per work call.").def("__repr__", [](const gr::RuntimePort& port) { return std::format("<RuntimePort {} {} {}>", port.name, port.isInput ? "input" : "output", port.typeName); });
+    py::class_<gr::RuntimePort>(module, "RuntimePort", "One port of a block, as RuntimeGraph.input_ports() and output_ports() describe it.").def_readonly("name", &gr::RuntimePort::name, "The name connect() accepts: 'out', or 'in#1' for element 1 of a collection.").def_readonly("type_name", &gr::RuntimePort::typeName, "The value type, as the port spells it.").def_readonly("is_input", &gr::RuntimePort::isInput, "True for an input port.").def_readonly("is_message", &gr::RuntimePort::isMessage, "True for a message port, False for a stream port.").def_readonly("is_optional", &gr::RuntimePort::isOptional, "True when the port may stay unconnected.").def_readonly("is_synchronous", &gr::RuntimePort::isSynchronous, "True when the port moves samples in step with the block's other synchronous ports.").def_readonly("is_connected", &gr::RuntimePort::isConnected, "True while a running scheduler holds the port's edge connected.").def_readonly("domain", &gr::RuntimePort::domain, "The compute domain of the port.").def_readonly("collection", &gr::RuntimePort::collection, "The name of the collection the port belongs to, or ''.").def_readonly("index", &gr::RuntimePort::index, "The port's position in its collection, or 0.").def_readonly("min_samples", &gr::RuntimePort::minSamples, "The fewest samples the port takes per work call.").def_readonly("max_samples", &gr::RuntimePort::maxSamples, "The most samples the port takes per work call.").def("__repr__", [](const gr::RuntimePort& port) { return std::format("<RuntimePort {} {} {}>", port.name, port.isInput ? "input" : "output", port.typeName); });
 
     py::class_<gr::RuntimeEdge, GilFreeHolder<gr::RuntimeEdge>>(module, "RuntimeEdge", "One edge of a graph, as RuntimeGraph.edges() lists it.").def_property_readonly("source_block", [](const gr::RuntimeEdge& edge) { return edge.sourceBlock; }, "The block the edge leaves.").def_readonly("source_port", &gr::RuntimeEdge::sourcePort, "The output port the edge leaves.").def_property_readonly("destination_block", [](const gr::RuntimeEdge& edge) { return edge.destinationBlock; }, "The block the edge enters.").def_readonly("destination_port", &gr::RuntimeEdge::destinationPort, "The input port the edge enters.").def_property_readonly("min_buffer_size", [](const gr::RuntimeEdge& edge) { return edge.edge.minBufferSize; }, "The smallest buffer the edge asks for, the framework's default when none was given.").def_property_readonly("weight", [](const gr::RuntimeEdge& edge) { return edge.edge.weight; }, "The edge's weight.").def_property_readonly("name", [](const gr::RuntimeEdge& edge) { return edge.edge.name; }, "The edge's name.").def("__repr__", [](const gr::RuntimeEdge& edge) { return std::format("<RuntimeEdge {}.{} -> {}.{}>", edge.sourceBlock.uniqueName(), edge.sourcePort, edge.destinationBlock.uniqueName(), edge.destinationPort); });
 }
@@ -1034,14 +1028,13 @@ void defineRuntimeGraph(py::module_& module) {
         "A flow graph built by registry name.\n\n"
         "A RuntimeGraph owns its graph, or views one a subgraph block or a scheduler owns. A graph handed to "
         "Runtime.create moves into the scheduler, and every later call on this object raises Error.\n\n"
-        "The constructor, emplace(), emplace_subgraph(), remove(), clear() and from_yaml() release the GIL, and so "
+        "The constructor, emplace(), emplace_subgraph(), remove() and from_yaml() release the GIL, and so "
         "does the deallocation of a graph, a block handle or an edge.")
-        .def(py::init([](const py::object& settings, const py::object& types) {
-            gr::property_map initialSettings = propertyMapFrom(settings, types);
+        .def(py::init([] {
             noteLoaderUse();
-            return holdWithoutGil(GraphObject{.graph = withoutGil([&initialSettings] { return gr::RuntimeGraph(std::move(initialSettings)); })});
+            return holdWithoutGil(GraphObject{.graph = withoutGil([] { return gr::RuntimeGraph(); })});
         }),
-            py::arg("settings") = py::none(), py::arg("types") = py::none(), "Creates an empty graph with the given graph settings.")
+            "Creates an empty graph.")
         .def(
             "emplace",
             [](GraphObject& self, const std::string& type, const std::string& name, const py::object& parameters, const py::object& types) {
@@ -1072,13 +1065,6 @@ void defineRuntimeGraph(py::module_& module) {
             },
             py::arg("block"), "Removes a block and its edges.")
         .def(
-            "clear",
-            [](GraphObject& self) {
-                gr::RuntimeGraph& graph = self.get();
-                withoutGil([&graph] { graph.clear(); });
-            },
-            "Removes every block and edge.")
-        .def(
             "connect",
             [](GraphObject& self, const gr::BlockHandle& source, const std::string& sourcePort, const gr::BlockHandle& destination, const std::string& destinationPort, std::size_t minBufferSize, std::int32_t weight, std::string name) { //
                 raiseIfFailed(self.get().connect(source, sourcePort, destination, destinationPort, gr::EdgeSpec{.minBufferSize = minBufferSize, .weight = weight, .name = std::move(name)}));
@@ -1090,8 +1076,6 @@ void defineRuntimeGraph(py::module_& module) {
             "input_port_names", [](GraphObject& self, const gr::BlockHandle& block) { return self.get().inputPortNames(block); }, py::arg("block"), "Returns the names of a block's input ports.")
         .def(
             "output_port_names", [](GraphObject& self, const gr::BlockHandle& block) { return self.get().outputPortNames(block); }, py::arg("block"), "Returns the names of a block's output ports.")
-        .def(
-            "port_type_name", [](GraphObject& self, const gr::BlockHandle& block, bool isInput, const std::string& port) { return self.get().portTypeName(block, isInput, port); }, py::arg("block"), py::arg("is_input"), py::arg("port"), "Returns the value type of one port, or '' when the block has no such port.")
         .def(
             "input_ports", [](GraphObject& self, const gr::BlockHandle& block) { return self.get().inputPorts(block); }, py::arg("block"), "Describes the ports input_port_names() lists, in the same order.")
         .def(

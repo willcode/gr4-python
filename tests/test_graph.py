@@ -43,7 +43,6 @@ class Chain(unittest.TestCase):
                     for port in ports:
                         self.assertIs(port.is_input, is_input)
                         self.assertFalse(port.is_message)
-                        self.assertEqual(port.type_name, self.graph.port_type_name(block, is_input, port.name))
                         self.assertEqual(port.type_name, "float32")
                         self.assertFalse(port.is_connected)
 
@@ -96,7 +95,7 @@ class Chain(unittest.TestCase):
     def test_a_block_reports_its_settings_and_their_types(self):
         self.assertEqual(self.head.get_value("n_samples_max"), 100)
         self.assertEqual(self.head.get(["n_samples_max"]), {"n_samples_max": 100})
-        self.assertEqual(self.head.active_parameters()["n_samples_max"], 100)
+        self.assertEqual(self.head.get()["n_samples_max"], 100)
         self.assertEqual(self.head.setting_types()["n_samples_max"], "uint32")
         with self.assertRaises(KeyError):
             self.head.get_value("no_such_setting")
@@ -105,15 +104,6 @@ class Chain(unittest.TestCase):
         self.assertEqual(self.head.set_staged({"n_samples_max": 7}, {"n_samples_max": "uint32"}), {})
         self.assertEqual(self.head.staged_parameters()["n_samples_max"], 7)
         self.assertIn("no_such_setting", self.head.set_staged({"no_such_setting": 1.0}))
-
-    def test_set_stores_declared_settings_and_hands_undeclared_ones_to_the_meta_information(self):
-        not_stored = self.head.set({"n_samples_max": 7, "note": "kept"}, {"n_samples_max": "uint32"})
-        self.assertEqual(not_stored, {"note": "kept"})
-        self.assertEqual(self.head.meta_information()["note"], "kept")
-        self.assertEqual(self.head.get_value("n_samples_max"), 100)
-        self.assertNotIn("n_samples_max", self.head.staged_parameters())
-        self.assertEqual(self.head.set_staged({"other": 1}), {"other": 1})
-        self.assertNotIn("other", self.head.meta_information())
 
     def test_a_value_that_does_not_fit_names_its_key(self):
         with self.assertRaisesRegex(OverflowError, "'n_samples_max'"):
@@ -132,7 +122,8 @@ class Chain(unittest.TestCase):
         self.assertEqual(set(self.graph.blocks()), {self.source, self.head})
         with self.assertRaises(_gr4.Error):
             self.graph.find(self.sink.unique_name)
-        self.graph.clear()
+        for block in self.graph.blocks():
+            self.graph.remove(block)
         self.assertEqual(self.graph.blocks(), [])
 
     def test_a_subgraph_is_wired_through_the_view_of_its_interior(self):

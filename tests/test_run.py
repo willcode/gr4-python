@@ -160,10 +160,9 @@ class FailedRun(unittest.TestCase):
 
 
 class Defaults(unittest.TestCase):
-    """reset_defaults() restores the settings a block was built with, and store_defaults() makes the active ones
-    the defaults."""
+    """A run applies the staged settings and leaves the defaults the block was built with."""
 
-    def test_a_run_applies_staged_settings_that_the_defaults_restore_and_store(self):
+    def test_a_run_applies_staged_settings_and_keeps_the_defaults(self):
         graph = _gr4.RuntimeGraph()
         source = graph.emplace(COUNTING_SOURCE, "source")
         head = graph.emplace(HEAD, "head", {"n_samples_max": 100}, {"n_samples_max": "uint32"})
@@ -178,14 +177,6 @@ class Defaults(unittest.TestCase):
         runtime.run_and_wait()
         self.assertEqual(head.get_value("n_samples_max"), 7)
         self.assertEqual(head.default_parameters()["n_samples_max"], 100)
-        head.reset_defaults()
-        self.assertEqual(head.get_value("n_samples_max"), 100)
-
-        head.set_staged({"n_samples_max": 11}, {"n_samples_max": "uint32"})
-        runtime.run_and_wait()
-        self.assertEqual(head.get_value("n_samples_max"), 11)
-        head.store_defaults()
-        self.assertEqual(head.default_parameters()["n_samples_max"], 11)
 
 
 if __name__ == "__main__":

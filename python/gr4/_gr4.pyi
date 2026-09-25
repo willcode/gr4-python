@@ -97,14 +97,11 @@ class BlockHandle:
     def get_value(self, key: str) -> _Value:
         """Returns the active value of one setting. KeyError when the block has no setting of that name."""
 
-    def active_parameters(self) -> _Settings:
-        """Returns the settings in force."""
-
     def staged_parameters(self) -> _Settings:
         """Returns the settings staged for the block's next work call."""
 
     def default_parameters(self) -> _Settings:
-        """Returns the settings reset_defaults() restores."""
+        """Returns the block's default settings."""
 
     def setting_types(self) -> dict[str, str]:
         """Returns the type code of every active setting, by key."""
@@ -115,23 +112,11 @@ class BlockHandle:
         Returns the settings that could not be staged.
         """
 
-    def set(self, parameters: dict[str, object], types: dict[str, str] | None = None) -> _Settings:
-        """Stores settings without staging them; types maps a key to its type code.
-
-        Returns the settings that could not be stored.
-        """
-
     def meta_information(self) -> _Settings:
         """Returns the block's meta-information."""
 
     def set_meta_information(self, information: dict[str, object]) -> None:
         """Replaces the block's meta-information."""
-
-    def store_defaults(self) -> None:
-        """Makes the active settings the defaults."""
-
-    def reset_defaults(self) -> None:
-        """Restores the default settings."""
 
     def __eq__(self, other: object) -> bool:
         """True when both handles name the same block."""
@@ -148,7 +133,7 @@ class RuntimePort:
 
     @property
     def type_name(self) -> str:
-        """The value type, as port_type_name() spells it."""
+        """The value type, as the port spells it."""
 
     @property
     def is_input(self) -> bool:
@@ -227,12 +212,12 @@ class RuntimeGraph:
     A RuntimeGraph owns its graph, or views one a subgraph block or a scheduler owns. A graph handed to
     Runtime.create moves into the scheduler, and every later call on this object raises Error.
 
-    The constructor, emplace(), emplace_subgraph(), remove(), clear() and from_yaml() release the GIL, and so does the
+    The constructor, emplace(), emplace_subgraph(), remove() and from_yaml() release the GIL, and so does the
     deallocation of a graph, a block handle or an edge.
     """
 
-    def __init__(self, settings: dict[str, object] | None = None, types: dict[str, str] | None = None) -> None:
-        """Creates an empty graph with the given graph settings."""
+    def __init__(self) -> None:
+        """Creates an empty graph."""
 
     def emplace(
         self, type: str, name: str, parameters: dict[str, object] | None = None, types: dict[str, str] | None = None
@@ -258,9 +243,6 @@ class RuntimeGraph:
     def remove(self, block: BlockHandle) -> None:
         """Removes a block and its edges."""
 
-    def clear(self) -> None:
-        """Removes every block and edge."""
-
     def connect(
         self,
         source: BlockHandle,
@@ -283,9 +265,6 @@ class RuntimeGraph:
 
     def output_port_names(self, block: BlockHandle) -> list[str]:
         """Returns the names of a block's output ports."""
-
-    def port_type_name(self, block: BlockHandle, is_input: bool, port: str) -> str:
-        """Returns the value type of one port, or '' when the block has no such port."""
 
     def input_ports(self, block: BlockHandle) -> list[RuntimePort]:
         """Describes the ports input_port_names() lists, in the same order."""

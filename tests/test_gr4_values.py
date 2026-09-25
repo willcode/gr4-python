@@ -59,7 +59,7 @@ class Mapping(unittest.TestCase):
         self.assertEqual(settings["tone_frequency"], 440.0)
         self.assertEqual(settings.staged, {"tone_frequency": 880.0, "amplitude": 2.0})
         self.assertEqual(settings.defaults["amplitude"], 1.0)
-        self.assertEqual(dict(settings), tone.active_parameters())
+        self.assertEqual(dict(settings), tone.get())
         self.assertEqual(set(settings), set(tone.setting_types()))
         self.assertIn("amplitude", settings)
         self.assertNotIn("amplitud", settings)
