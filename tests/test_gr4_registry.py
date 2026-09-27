@@ -68,6 +68,30 @@ class Listing(unittest.TestCase):
         with self.assertRaisesRegex(gr4.UnknownBlockType, "'HeadBlock'"):
             registry.find("HeadBlok", "float32")
 
+    def test_find_names_the_namespaces_when_two_hold_the_family(self):
+        keys = (
+            "acme::HeadBlock<float32>",
+            "gr::blocks::testing::HeadBlock<float32>",
+            "gr::blocks::testing::HeadBlock<int16>",
+            "other::testing::HeadBlock<float32>",
+        )
+        with mock.patch.object(registry, "_every_key", return_value=keys):
+            for type_parameters in (("float32",), ()):
+                with self.assertRaises(gr4.UnknownBlockType) as both:
+                    registry.find("HeadBlock", *type_parameters)
+                message = both.exception.message
+                for family in ("'acme::HeadBlock'", "'gr::blocks::testing::HeadBlock'", "'other::testing::HeadBlock'"):
+                    self.assertIn(family, message)
+                self.assertIn("namespace component selects one, as in 'acme::HeadBlock'", message)
+                self.assertNotIn("type parameters select one", message)
+            with self.assertRaises(gr4.UnknownBlockType) as deeper:
+                registry.find("testing::HeadBlock", "float32")
+            self.assertIn("as in 'blocks::testing::HeadBlock'", deeper.exception.message)
+            self.assertEqual(registry.find("acme::HeadBlock"), keys[0])
+            self.assertEqual(registry.find("blocks::testing::HeadBlock", "int16"), keys[2])
+            with self.assertRaisesRegex(gr4.UnknownBlockType, "type parameters select one"):
+                registry.find("gr::blocks::testing::HeadBlock")
+
     def test_an_unknown_key_is_refused_with_the_closest_keys(self):
         with self.assertRaisesRegex(gr4.UnknownBlockType, "HeadBlock<float32>"):
             registry["gr::blocks::testing::HeadBlok<float32>"]

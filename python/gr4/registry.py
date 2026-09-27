@@ -155,13 +155,24 @@ def _spelled(parameters: tuple[str, ...]) -> str:
     return f"<{', '.join(parameters)}>"
 
 
+def _shortest_qualification(name: str, others: list[str]) -> str:
+    """Returns the shortest trailing part of the family name that no family among others matches."""
+    parts = name.split("::")
+    for count in range(2, len(parts) + 1):
+        tail = "::".join(parts[-count:])
+        if not any(_in_family(other, tail) for other in others):
+            return tail
+    return name
+
+
 def find(family: str, *type_parameters: str) -> str:
     """Returns the one key of family whose type parameters are type_parameters.
 
-    family is a key's name without its type parameters, qualified ('gr::blocks::testing::HeadBlock') or not
-    ('HeadBlock'). With no type parameters the family must hold one key. A family that does not exist raises
-    UnknownBlockType naming the closest families, and parameters that select no key, or several, raise it naming the
-    type parameters that exist.
+    family is a key's name without its type parameters, with any trailing part of its namespace path: 'HeadBlock',
+    'testing::HeadBlock' and 'gr::blocks::testing::HeadBlock' name the same family. With no type parameters the family
+    must hold one key. A family that does not exist raises UnknownBlockType naming the closest families. A name that
+    two namespaces hold raises it naming the qualified families. Parameters that select no key, or several, raise it
+    naming the type parameters that exist.
     """
     wanted = tuple(" ".join(parameter.split()) for parameter in type_parameters)
     members = [key for key in _every_key() if _in_family(key, family)]
@@ -174,6 +185,14 @@ def find(family: str, *type_parameters: str) -> str:
     matches = [key for key in members if type_parameters_of(key) == wanted] if wanted else members
     if len(matches) == 1:
         return matches[0]
+    families = sorted({family_of(key) for key in matches})
+    if len(families) > 1:
+        example = _shortest_qualification(families[0], families[1:])
+        raise UnknownBlockType(
+            f"'{family}' names {len(families)} families, {', '.join(repr(name) for name in families)}; "
+            f"a namespace component selects one, as in '{example}'",
+            "registry.find",
+        )
     existing = ", ".join(_spelled(type_parameters_of(key)) for key in members)
     if not matches:
         raise UnknownBlockType(f"'{family}' has no type {_spelled(wanted)}; it has {existing}", "registry.find")
