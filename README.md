@@ -15,23 +15,42 @@ type-erased runtime of `gnuradio4-core` (`gnuradio-4.0/Runtime.hpp`). The
 
 ## Requirements
 
-- An installed `gnuradio4-core` that provides `gnuradio-4.0/Runtime.hpp`,
-  built with the block registry enabled, and the block plugins to use with it.
+- One installed prefix that holds `gnuradio4-core`, built with the block
+  registry enabled and providing `gnuradio-4.0/Runtime.hpp`; the block
+  library `libgnuradio-blocklib-core`; the blocks; and their plugins in
+  `<libdir>/gnuradio-4/plugins`. The core's CMake package is in
+  `<libdir>/cmake/gnuradio4`.
 - CMake 3.25 or later, Ninja, and a C++23 compiler of the same family as the
   one that built `gnuradio4-core`.
 - Python 3.12 or later with its development files, and pybind11 3.
 
 ## Building and installing
 
-Point `CMAKE_PREFIX_PATH` at the prefix that holds `gnuradio4-core`:
+A build sets these cache entries:
+
+| Entry                         | Value                                  |
+| ----------------------------- | -------------------------------------- |
+| `CMAKE_PREFIX_PATH`           | the prefix that holds the core         |
+| `CMAKE_BUILD_TYPE`            | `Release`                              |
+| `CMAKE_CXX_COMPILER`          | a compiler of the core's family        |
+| `Python_EXECUTABLE`           | the Python to build the extension for  |
+| `CMAKE_INSTALL_PREFIX`        | the prefix the package installs into   |
+| `GR4_TEST_PLUGIN_DIRECTORIES` | the plugin directories of the tests    |
 
 ```sh
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_PREFIX_PATH=/opt/gnuradio4 \
+      -DCMAKE_CXX_COMPILER=g++ \
+      -DPython_EXECUTABLE=/usr/bin/python3 \
       -DCMAKE_INSTALL_PREFIX=/opt/gnuradio4
 cmake --build build
 cmake --install build
 ```
+
+The build reads the core's package from `<prefix>/<libdir>/cmake/gnuradio4`
+and links the core and the block library from `<prefix>/<libdir>`, which the
+extension carries as its run path. The plugin directory of that prefix,
+`<prefix>/<libdir>/gnuradio-4/plugins`, is the default of gr4 and of the tests.
 
 The install puts the package in
 `<prefix>/<libdir>/python<X.Y>/site-packages/gr4`. Add that `site-packages`
@@ -62,8 +81,9 @@ gr4.configure(plugin_dirs=["/opt/gnuradio4/lib64/gnuradio-4/plugins"])
 The tests use the standard library's `unittest` and open no hardware. Each
 file under `tests/` is one `ctest` entry, run with the build tree's
 `PYTHONPATH`. The cache variable `GR4_TEST_PLUGIN_DIRECTORIES` names the
-plugin directories the tests load blocks from; it defaults to the core
-prefix's own.
+plugin directories the tests load blocks from, separated by colons. It
+defaults to the plugin directory of the core's prefix. Blocks installed in
+another prefix are named in the variable:
 
 ```sh
 cmake -B build \
