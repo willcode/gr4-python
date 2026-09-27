@@ -22,6 +22,9 @@ NULL_SOURCE = "gr::blocks::testing::NullSource<float32>"
 NULL_SINK = "gr::blocks::testing::NullSink<float32>"
 # The signal generator runs free on the wall clock at its sample rate; at this rate a thousand samples take 50 us.
 RATE = 20_000_000
+# 2**24 + 1 has one significant bit more than a float32 mantissa holds; as a float32 it rounds to 2**24.
+INEXACT_RATE = 2**24 + 1
+ROUNDED_RATE = float(2**24)
 
 
 def read_float32(path):
@@ -98,19 +101,22 @@ class TemporaryFiles(unittest.TestCase):
 class ConstructionSettings(TemporaryFiles):
     """add() checks keywords against the description and converts each value to its setting's type."""
 
-    def test_sample_rate_20_000_000_reaches_a_float32_setting(self):
+    def test_an_integer_a_float32_cannot_hold_exactly_reaches_a_float32_setting_rounded(self):
         graph = gr4.Graph()
-        tone = graph.add(SIGNAL_GENERATOR, "tone", sample_rate=20_000_000)
+        tone = graph.add(SIGNAL_GENERATOR, "tone", sample_rate=INEXACT_RATE)
         self.assertEqual(tone.settings.types["sample_rate"], "float32")
-        self.assertEqual(tone.settings["sample_rate"], 20_000_000.0)
+        self.assertEqual(tone.settings["sample_rate"], ROUNDED_RATE)
         # Without the description's type code the settings code refuses the same integer.
         with self.assertRaises(gr4.SettingError):
-            graph.add(SIGNAL_GENERATOR, "unconverted", strict=False, sample_rate=20_000_000)
+            graph.add(SIGNAL_GENERATOR, "unconverted", strict=False, sample_rate=INEXACT_RATE)
+        # It takes an integer a float32 holds exactly.
+        exact = graph.add(SIGNAL_GENERATOR, "exact", strict=False, sample_rate=RATE)
+        self.assertEqual(exact.settings["sample_rate"], float(RATE))
 
     def test_a_setting_the_block_refuses_without_strict_raises_setting_error_with_the_block_s_message(self):
         refusals = {
             "undeclared key": ({"sample_rat": 2.0}, ["settings could not be applied", '"sample_rat"']),
-            "value of another type": ({"sample_rate": 20_000_000}, ["'sample_rate'", "float32"]),
+            "value of another type": ({"sample_rate": INEXACT_RATE}, ["'sample_rate'", "float32"]),
         }
         for refusal, (settings, phrases) in refusals.items():
             with self.subTest(refusal=refusal):
@@ -289,7 +295,7 @@ class Documents(TemporaryFiles):
         product = gr4.Graph()
         product.add(gr4.registry.find("MultiplyConst", "complex<float32>"), "product")
         cases = {
-            "tone": (without_parameter(tone.to_yaml(), "sample_rate"), "sample_rate", 20_000_000, 20_000_000.0),
+            "tone": (without_parameter(tone.to_yaml(), "sample_rate"), "sample_rate", INEXACT_RATE, ROUNDED_RATE),
             "product": (without_parameter(product.to_yaml(), "value"), "value", 2 + 1j, 2 + 1j),
         }
         for name, (document, key, value, loaded) in cases.items():

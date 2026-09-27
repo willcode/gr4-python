@@ -132,9 +132,10 @@ with its scalar rule. A numpy scalar or one-dimensional array, when numpy is pre
 
 When the target type is known — from the block's active values, or from the `BlockType` for `add()` — the value
 is first coerced to it in Python, and a failure is a `TypeError` or `OverflowError` naming the key and the type
-it needs. That also removes two refusals of the settings code: an integer wider than a float's mantissa does not
-convert to that float, so `sample_rate=20_000_000` on a `float32` setting fails without coercion, and a complex
-value never changes precision, so a Python `complex` fails on a `complex<float32>` setting.
+it needs. That also removes two refusals of the settings code. The settings code converts an integer to a float
+only when the float holds it exactly, so `sample_rate=16_777_217` (2**24 + 1) fails on a `float32` setting without
+coercion and reaches it as 16777216.0 with it. A complex value never changes precision, so a Python `complex` fails
+on a `complex<float32>` setting without coercion.
 
 With `strict=True`, a key the block does not declare raises `KeyError` naming the closest declared keys before
 the block is constructed; without it, construction itself refuses the key and names no alternative. Meta-information is

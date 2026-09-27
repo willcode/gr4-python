@@ -115,9 +115,9 @@ graph.run()
 
 Each keyword is checked against the type's description: a key the type does
 not declare raises `KeyError` naming the closest keys, and each value is
-converted to its setting's type. `sample_rate=20_000_000` therefore reaches a
-`float32` setting. `strict=False` skips the check and the conversion, and
-`meta=` adds meta-information.
+converted to its setting's type. `sample_rate=16_777_217` therefore reaches a
+`float32` setting, rounded to 16777216.0. `strict=False` skips the check and
+the conversion, and `meta=` adds meta-information.
 
 A graph also holds subgraphs, whose interior is a `Graph` of its own, and a
 nested scheduler, added by its scheduler key:

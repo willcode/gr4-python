@@ -426,7 +426,7 @@ class Messages(unittest.TestCase):
             # Addressed by its unique name, the payload keeps the Int64 its value selects, which the block refuses.
             with self.assertRaisesRegex(gr4.Error, "sample_rate"):
                 self.scheduler.request(
-                    self.tone.unique_name, "StagedSettings", {"sample_rate": 20_000_000}, gr4.Command.SET
+                    self.tone.unique_name, "StagedSettings", {"sample_rate": 16_777_217}, gr4.Command.SET
                 )
             self.scheduler.send(self.tone, "Settings", {"sample_rate": 16_777_217})
             self.assertEqual(wait_for_value(self.tone, "sample_rate", 16_777_216.0), 16_777_216.0)

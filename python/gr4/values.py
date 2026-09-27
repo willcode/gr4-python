@@ -10,7 +10,7 @@ for an integer type) or TypeError (the wrong kind), naming the key and the type 
 The package passes a setting's type code wherever it knows one. The block's setting types give it when a value is
 staged and when a payload goes to the block's Settings or StagedSettings endpoint. The type's description gives it when
 a block is added, when a scheduler is created with settings, and when settings are merged into a graph document. An
-integer wider than the mantissa of a float32 therefore reaches a float32 setting, and a complex reaches a
+integer a float32 cannot hold exactly therefore reaches a float32 setting rounded, and a complex reaches a
 complex<float32> one; the settings code refuses both without the code.
 """
 
