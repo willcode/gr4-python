@@ -101,12 +101,16 @@ documentation, and its ports. `help()` shows the description.
 from gr4 import registry
 
 registry.search("HeadBlock")          # every key that contains the text
-key = registry.find("HeadBlock", "float32")
+key = registry.find("testing::HeadBlock", "float32")
 head = registry[key]
 head.settings["n_samples_max"].type   # 'uint32'
 [port.name for port in head.outputs]  # ['out']
 help(head)
 ```
+
+The examples name a family with one component of its namespace, as in
+`testing::HeadBlock`, because `find()` refuses a bare name that two namespaces
+hold.
 
 A description is read from one default-constructed instance, once per process.
 `registry.describe_all()` reads many in child processes and reports a type
@@ -125,7 +129,7 @@ import gr4
 graph = gr4.Graph()
 tone = graph.add("gr::blocks::basic::SignalGenerator<float32>", "tone",
                  sample_rate=48_000, tone_frequency=440)
-head = graph.add(gr4.registry.find("HeadBlock", "float32"), "head",
+head = graph.add(gr4.registry.find("testing::HeadBlock", "float32"), "head",
                  n_samples_max=1000)
 sink = graph.add("gr::blocks::fileio::BasicFileSink<float32>", "sink",
                  file_name="/tmp/tone.f32")
@@ -241,8 +245,9 @@ type the document wrote for it, and a new one takes its setting's type.
 
 ```python
 chain = gr4.Graph()
+head_key = gr4.registry.find("testing::HeadBlock", "float32")
 chain.connect(chain.add("gr::blocks::testing::NullSource<float32>", "source"),
-              chain.add(gr4.registry.find("HeadBlock", "float32"), "head"),
+              chain.add(head_key, "head"),
               chain.add("gr::blocks::testing::NullSink<float32>", "sink"))
 with open("chain.grc", "w") as file:
     file.write(chain.to_yaml())

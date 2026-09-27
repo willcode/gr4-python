@@ -26,8 +26,8 @@ def write_tone(path: str) -> None:
         tone_frequency=440,
         amplitude=0.5,
     )
-    head = graph.add(gr4.registry.find("HeadBlock", "float32"), "head", n_samples_max=SAMPLES)
-    sink = graph.add(gr4.registry.find("BasicFileSink", "float32"), "sink", file_name=path)
+    head = graph.add(gr4.registry.find("testing::HeadBlock", "float32"), "head", n_samples_max=SAMPLES)
+    sink = graph.add(gr4.registry.find("fileio::BasicFileSink", "float32"), "sink", file_name=path)
     graph.connect(tone, head, sink)
     graph.run()
 

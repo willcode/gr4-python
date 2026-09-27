@@ -68,6 +68,10 @@ class Listing(unittest.TestCase):
         with self.assertRaisesRegex(gr4.UnknownBlockType, "'HeadBlock'"):
             registry.find("HeadBlok", "float32")
 
+    def test_find_takes_any_trailing_part_of_the_namespace_path(self):
+        self.assertEqual(registry.find("testing::HeadBlock", "float32"), HEAD)
+        self.assertEqual(registry.find("blocks::testing::HeadBlock", "float32"), HEAD)
+
     def test_find_names_the_namespaces_when_two_hold_the_family(self):
         keys = (
             "acme::HeadBlock<float32>",

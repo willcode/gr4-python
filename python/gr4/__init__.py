@@ -8,7 +8,7 @@ own. The extension module ``gr4._gr4`` binds the core library's type-erased runt
 
     graph = gr4.Graph()
     tone = graph.add("gr::blocks::basic::SignalGenerator<float32>", "tone", sample_rate=48_000)
-    head = graph.add(gr4.registry.find("HeadBlock", "float32"), "head", n_samples_max=1000)
+    head = graph.add(gr4.registry.find("testing::HeadBlock", "float32"), "head", n_samples_max=1000)
     sink = graph.add("gr::blocks::fileio::BasicFileSink<float32>", "sink", file_name="/tmp/tone.f32")
     graph.connect(tone, head, sink)
     graph.run()
