@@ -164,8 +164,9 @@ applies it, so the bindings stage.
 
 ## Plugins
 
-`GNURADIO4_PLUGIN_DIRECTORIES` is honored; when it is unset the extension sets it to the plugin directory of
-the prefix it was built against, since the loader otherwise searches a path relative to the working directory.
+`GNURADIO4_PLUGIN_DIRECTORIES` is honored. When it is unset the extension sets it to the plugin directory of
+the prefix it was built against. The loader reads the core's installed plugin directory without the variable, and
+setting it gives `os.environ`, `plugin_directories()` and the loader one value.
 `gr4.configure(plugin_dirs=...)` sets it before the first use and raises after. Whether the loader's
 `RTLD_LOCAL` opening is enough inside a Python process, or the libraries must be preloaded with `RTLD_GLOBAL`
 as `gnuradio4-control-plane` does, is settled by a test that builds and runs a graph of plugin blocks, and the

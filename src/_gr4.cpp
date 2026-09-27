@@ -53,8 +53,8 @@ using gr::pmt::Value;
 constexpr const char* kPluginDirectoriesVariable = "GNURADIO4_PLUGIN_DIRECTORIES";
 
 /// Names the plugin directory of the core this module was built against when the environment names none. The
-/// plugin loader reads the variable once, at the first registry call, and searches a path relative to the working
-/// directory without it. Setting it through `os.environ` gives Python and the loader one value.
+/// plugin loader reads the variable once, at the first registry call, and reads the core's installed plugin directory
+/// without it. Setting it through `os.environ` gives Python, `plugin_directories()` and the loader one value.
 void applyDefaultPluginDirectory() {
     if (std::getenv(kPluginDirectoriesVariable) == nullptr) {
         py::module_::import("os").attr("environ")[kPluginDirectoriesVariable] = GR4_DEFAULT_PLUGIN_DIRECTORY;
