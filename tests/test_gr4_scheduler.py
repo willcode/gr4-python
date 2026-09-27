@@ -189,14 +189,18 @@ class Runs(TemporaryFiles):
             with scheduler.start():
                 for event in scheduler.events(timeout=PATIENCE):
                     seen.append(event)
-        self.assertEqual([event.is_error for event in seen], [True])
+        # The block's failure comes first; the reports of the stop that follows name the block and not the file.
+        self.assertTrue(seen and all(event.is_error for event in seen), seen)
         self.assertIn(missing, seen[0].text)
+        self.assertEqual(sum(missing in event.text for event in seen), 1, seen)
         self.assertEqual(list(caught.exception.events), seen)
         self.assertEqual(scheduler.state, gr4.State.ERROR)
         # An exception of the with block propagates in place of the run's RunError.
         with self.assertRaises(LookupError):
             with scheduler.start():
-                self.assertEqual(wait_for_state(scheduler, gr4.State.ERROR), gr4.State.ERROR)
+                # start() returns before the new run resets the ERROR the last run left. The test awaits the run's end.
+                self.assertTrue(scheduler._runtime.wait(PATIENCE))
+                self.assertEqual(scheduler.state, gr4.State.ERROR)
                 raise LookupError("raised in the with block")
 
     def test_a_stop_before_the_first_run_leaves_the_state_and_the_next_run_whole(self):
