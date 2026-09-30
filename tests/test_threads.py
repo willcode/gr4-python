@@ -174,7 +174,7 @@ class RunInThread(unittest.TestCase):
             "graph = _gr4.RuntimeGraph()\n"
             "source = graph.emplace('gr::blocks::testing::CountingSource<float32>', 'source')\n"
             "head = graph.emplace('gr::blocks::testing::HeadBlock<float32>', 'head', {'n_samples_max': 100},"
-            " {'n_samples_max': 'uint32'})\n"
+            " {'n_samples_max': 'uint64'})\n"
             "sink = graph.emplace('gr::blocks::testing::NullSink<float32>', 'sink')\n"
             "graph.connect(source, 'out', head, 'in')\n"
             "graph.connect(head, 'out', sink, 'in')\n"

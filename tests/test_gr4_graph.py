@@ -136,7 +136,7 @@ class ConstructionSettings(TemporaryFiles):
 
     def test_a_value_that_does_not_fit_its_setting_names_the_key_and_the_type(self):
         graph = gr4.Graph()
-        with self.assertRaisesRegex(OverflowError, r"'n_samples_max'.*uint32"):
+        with self.assertRaisesRegex(OverflowError, r"'n_samples_max'.*uint64"):
             graph.add(gr4.registry.find("HeadBlock", "float32"), "head", n_samples_max=-1)
         with self.assertRaisesRegex(TypeError, r"'tone_frequency'.*float32"):
             graph.add(SIGNAL_GENERATOR, "tone", tone_frequency="high")
@@ -273,7 +273,7 @@ class Documents(TemporaryFiles):
         saved = save_chain(self, 1000)
         loaded = gr4.Graph.load(saved, settings={"head": {"n_samples_max": 777}})
         self.assertEqual(named(loaded, "head").settings["n_samples_max"], 777)
-        self.assertEqual(named(loaded, "head").settings.types["n_samples_max"], "uint32")
+        self.assertEqual(named(loaded, "head").settings.types["n_samples_max"], "uint64")
         with open(saved, encoding="utf-8") as file:
             self.assertEqual(named(gr4.Graph.load(file), "head").settings["n_samples_max"], 1000)
 

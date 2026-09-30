@@ -23,7 +23,7 @@ def counted_chain(path, samples):
     """Returns a graph of a counting source, a head block of samples and a file sink writing to path."""
     graph = _gr4.RuntimeGraph()
     source = graph.emplace(COUNTING_SOURCE, "source")
-    head = graph.emplace(HEAD, "head", {"n_samples_max": samples}, {"n_samples_max": "uint32"})
+    head = graph.emplace(HEAD, "head", {"n_samples_max": samples}, {"n_samples_max": "uint64"})
     sink = graph.emplace(FILE_SINK, "sink", {"file_name": path})
     graph.connect(source, "out", head, "in")
     graph.connect(head, "out", sink, "in")
@@ -165,7 +165,7 @@ class Defaults(unittest.TestCase):
     def test_a_run_applies_staged_settings_and_keeps_the_defaults(self):
         graph = _gr4.RuntimeGraph()
         source = graph.emplace(COUNTING_SOURCE, "source")
-        head = graph.emplace(HEAD, "head", {"n_samples_max": 100}, {"n_samples_max": "uint32"})
+        head = graph.emplace(HEAD, "head", {"n_samples_max": 100}, {"n_samples_max": "uint64"})
         sink = graph.emplace(NULL_SINK, "sink")
         graph.connect(source, "out", head, "in")
         graph.connect(head, "out", sink, "in")
@@ -173,7 +173,7 @@ class Defaults(unittest.TestCase):
         self.addCleanup(runtime.close)
         self.assertEqual(head.default_parameters()["n_samples_max"], 100)
 
-        head.set_staged({"n_samples_max": 7}, {"n_samples_max": "uint32"})
+        head.set_staged({"n_samples_max": 7}, {"n_samples_max": "uint64"})
         runtime.run_and_wait()
         self.assertEqual(head.get_value("n_samples_max"), 7)
         self.assertEqual(head.default_parameters()["n_samples_max"], 100)

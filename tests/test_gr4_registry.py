@@ -127,7 +127,7 @@ class Description(unittest.TestCase):
 
     def test_help_shows_the_description_of_the_type(self):
         text = pydoc.render_doc(registry[HEAD], renderer=pydoc.plaintext)
-        self.assertIn("n_samples_max (uint32", text)
+        self.assertIn("n_samples_max (uint64", text)
         self.assertIn("Limits the number of output samples", text)
         self.assertIn("A block or scheduler type", pydoc.render_doc(registry.BlockType, renderer=pydoc.plaintext))
 

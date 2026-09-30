@@ -31,7 +31,7 @@ class Coercion(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, r"'tone_frequency'.*float32"):
             self.settings["tone_frequency"] = "high"
         head = Settings(self.graph.emplace(HEAD, "head"), "head")
-        with self.assertRaisesRegex(OverflowError, r"'n_samples_max'.*uint32"):
+        with self.assertRaisesRegex(OverflowError, r"'n_samples_max'.*uint64"):
             head["n_samples_max"] = -1
         self.assertEqual(self.settings.staged, {})
 

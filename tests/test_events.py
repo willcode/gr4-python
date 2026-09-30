@@ -18,7 +18,7 @@ def counted_chain():
     """Returns a graph of a counting source, a head block of SAMPLES and a null sink, and the head block."""
     graph = _gr4.RuntimeGraph()
     source = graph.emplace(COUNTING_SOURCE, "source")
-    head = graph.emplace(HEAD, "head", {"n_samples_max": SAMPLES}, {"n_samples_max": "uint32"})
+    head = graph.emplace(HEAD, "head", {"n_samples_max": SAMPLES}, {"n_samples_max": "uint64"})
     sink = graph.emplace(NULL_SINK, "sink")
     graph.connect(source, "out", head, "in")
     graph.connect(head, "out", sink, "in")

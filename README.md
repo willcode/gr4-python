@@ -103,7 +103,7 @@ from gr4 import registry
 registry.search("HeadBlock")          # every key that contains the text
 key = registry.find("testing::HeadBlock", "float32")
 head = registry[key]
-head.settings["n_samples_max"].type   # 'uint32'
+head.settings["n_samples_max"].type   # 'uint64'
 [port.name for port in head.outputs]  # ['out']
 help(head)
 ```

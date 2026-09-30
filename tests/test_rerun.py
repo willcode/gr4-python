@@ -24,7 +24,7 @@ def chain_beside_an_endless_one(path):
     source into a null sink that keeps the run going until it is stopped; and the file sink and the null sink."""
     graph = _gr4.RuntimeGraph()
     source = graph.emplace(COUNTING_SOURCE, "source")
-    head = graph.emplace(HEAD, "head", {"n_samples_max": SAMPLES}, {"n_samples_max": "uint32"})
+    head = graph.emplace(HEAD, "head", {"n_samples_max": SAMPLES}, {"n_samples_max": "uint64"})
     sink = graph.emplace(FILE_SINK, "sink", {"file_name": path})
     graph.connect(source, "out", head, "in")
     graph.connect(head, "out", sink, "in")
@@ -53,7 +53,7 @@ class SecondRun(unittest.TestCase):
 
         graph = _gr4.RuntimeGraph()
         source = graph.emplace(COUNTING_SOURCE, "source")
-        head = graph.emplace(HEAD, "head", {"n_samples_max": SAMPLES}, {"n_samples_max": "uint32"})
+        head = graph.emplace(HEAD, "head", {"n_samples_max": SAMPLES}, {"n_samples_max": "uint64"})
         sink = graph.emplace(FILE_SINK, "sink", {"file_name": first})
         graph.connect(source, "out", head, "in")
         graph.connect(head, "out", sink, "in")

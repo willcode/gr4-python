@@ -27,7 +27,7 @@ class Chain(unittest.TestCase):
     def setUp(self):
         self.graph = _gr4.RuntimeGraph()
         self.source = self.graph.emplace(COUNTING_SOURCE, "source")
-        self.head = self.graph.emplace(HEAD, "head", {"n_samples_max": 100}, {"n_samples_max": "uint32"})
+        self.head = self.graph.emplace(HEAD, "head", {"n_samples_max": 100}, {"n_samples_max": "uint64"})
         self.sink = self.graph.emplace(NULL_SINK, "sink")
 
     def test_port_descriptions_agree_with_the_name_lists(self):
@@ -96,20 +96,20 @@ class Chain(unittest.TestCase):
         self.assertEqual(self.head.get_value("n_samples_max"), 100)
         self.assertEqual(self.head.get(["n_samples_max"]), {"n_samples_max": 100})
         self.assertEqual(self.head.get()["n_samples_max"], 100)
-        self.assertEqual(self.head.setting_types()["n_samples_max"], "uint32")
+        self.assertEqual(self.head.setting_types()["n_samples_max"], "uint64")
         with self.assertRaises(KeyError):
             self.head.get_value("no_such_setting")
 
     def test_staging_a_declared_setting_succeeds_and_an_undeclared_one_is_returned(self):
-        self.assertEqual(self.head.set_staged({"n_samples_max": 7}, {"n_samples_max": "uint32"}), {})
+        self.assertEqual(self.head.set_staged({"n_samples_max": 7}, {"n_samples_max": "uint64"}), {})
         self.assertEqual(self.head.staged_parameters()["n_samples_max"], 7)
         self.assertIn("no_such_setting", self.head.set_staged({"no_such_setting": 1.0}))
 
     def test_a_value_that_does_not_fit_names_its_key(self):
         with self.assertRaisesRegex(OverflowError, "'n_samples_max'"):
-            self.head.set_staged({"n_samples_max": -1}, {"n_samples_max": "uint32"})
+            self.head.set_staged({"n_samples_max": -1}, {"n_samples_max": "uint64"})
         with self.assertRaisesRegex(TypeError, "'n_samples_max'"):
-            self.head.set_staged({"n_samples_max": "many"}, {"n_samples_max": "uint32"})
+            self.head.set_staged({"n_samples_max": "many"}, {"n_samples_max": "uint64"})
 
     def test_meta_information_is_replaced_and_read_back(self):
         self.head.set_meta_information({"note": "bench", "level": 2})

@@ -21,7 +21,7 @@ def counted_chain(path):
     """Returns a graph of a counting source, a head block of WRITTEN_SAMPLES and a file sink writing to path."""
     graph = _gr4.RuntimeGraph()
     source = graph.emplace(COUNTING_SOURCE, "source")
-    head = graph.emplace(HEAD, "head", {"n_samples_max": WRITTEN_SAMPLES}, {"n_samples_max": "uint32"})
+    head = graph.emplace(HEAD, "head", {"n_samples_max": WRITTEN_SAMPLES}, {"n_samples_max": "uint64"})
     sink = graph.emplace(FILE_SINK, "sink", {"file_name": path})
     graph.connect(source, "out", head, "in")
     graph.connect(head, "out", sink, "in")
@@ -54,8 +54,8 @@ class MergeIntoDocument(unittest.TestCase):
     def test_only_the_merged_value_changes_and_it_keeps_the_written_type(self):
         merged = _gr4.merge_parameters(self.document, {"head": {"n_samples_max": MERGED_SAMPLES}})
         removed, added = changed_lines(self.document, merged)
-        self.assertEqual([line.strip() for line in removed], [f"n_samples_max: !!uint32 {WRITTEN_SAMPLES}"])
-        self.assertEqual([line.strip() for line in added], [f"n_samples_max: !!uint32 {MERGED_SAMPLES}"])
+        self.assertEqual([line.strip() for line in removed], [f"n_samples_max: !!uint64 {WRITTEN_SAMPLES}"])
+        self.assertEqual([line.strip() for line in added], [f"n_samples_max: !!uint64 {MERGED_SAMPLES}"])
         self.assertIn("max_bytes_per_file: !!uint32 0", merged)
 
     def test_a_block_is_found_by_its_unique_name(self):
@@ -64,10 +64,10 @@ class MergeIntoDocument(unittest.TestCase):
             "  - id: gr::blocks::testing::HeadBlock<float32>\n"
             "    unique_name: head-17\n"
             "    parameters:\n"
-            f"      n_samples_max: !!uint32 {WRITTEN_SAMPLES}\n"
+            f"      n_samples_max: !!uint64 {WRITTEN_SAMPLES}\n"
         )
         merged = _gr4.merge_parameters(document, {"head-17": {"n_samples_max": MERGED_SAMPLES}})
-        self.assertIn(f"n_samples_max: !!uint32 {MERGED_SAMPLES}", merged)
+        self.assertIn(f"n_samples_max: !!uint64 {MERGED_SAMPLES}", merged)
 
     def test_a_new_parameter_takes_the_type_code_given_or_the_plain_mapping(self):
         typed = _gr4.merge_parameters(self.document, {"head": {"marker": 5}}, {"head": {"marker": "int16"}})
